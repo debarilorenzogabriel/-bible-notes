@@ -1,74 +1,226 @@
-Informativa sulla privacy – Bible Notes
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Privacy Policy - Bible Notes</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
 
-Ultimo aggiornamento: 17 febbraio 2026
+    body {
+      min-height: 100vh;
+      background: #f3f6fb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
 
-Bible Notes è un’applicazione di note per lo studio biblico sviluppata da Lorenzo Gabriel (di seguito “sviluppatore”). Questa informativa descrive come l’app gestisce i dati degli utenti.
+    .app-shell {
+      width: 100%;
+      max-width: 900px;
+      background: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 48, 135, 0.08);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 20px 20px;
+    }
 
-1. Dati raccolti
-Bible Notes non raccoglie né invia alcun dato personale a server esterni.
+    .header {
+      border-bottom: 1px solid #e1e5e9;
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
 
-Non è richiesto alcun account o registrazione.
+    .header-title {
+      font-size: 1.25rem;
+      color: #003087;
+      font-weight: 600;
+    }
 
-Non vengono raccolti nome, email, numero di telefono o altri dati identificativi.
+    .header-subtitle {
+      font-size: 0.85rem;
+      color: #5b6470;
+    }
 
-Non vengono integrati servizi di analisi di terze parti (ad es. Google Analytics) o SDK pubblicitari.
+    .content {
+      font-size: 0.95rem;
+      color: #333;
+      line-height: 1.55;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding-bottom: 8px;
+    }
 
-2. Dati salvati sul dispositivo
-Tutti i contenuti creati dall’utente vengono salvati solo sul dispositivo, all’interno dell’app, ad esempio tramite memoria locale (localStorage).
+    .section-title {
+      font-size: 1rem;
+      color: #003087;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
 
-Questi dati includono:
+    p {
+      margin-bottom: 6px;
+    }
 
-Note di testo
+    ul {
+      padding-left: 16px;
+      margin-top: 4px;
+    }
 
-Evidenziazioni
+    li {
+      margin-bottom: 4px;
+    }
 
-Etichette (tag)
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #e1ecff;
+      color: #003087;
+      font-size: 0.8rem;
+    }
 
-Riferimenti biblici
+    .footer {
+      border-top: 1px solid #e1e5e9;
+      margin-top: 16px;
+      padding-top: 8px;
+      font-size: 0.8rem;
+      color: #777;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
 
-Preferenze dell’app (es. scelta apertura versetti su JW Library o jw.org)
+    .footer a {
+      color: #4A90E2;
+      text-decoration: none;
+    }
 
-Questi dati non vengono sincronizzati automaticamente su server esterni dallo sviluppatore. La responsabilità del backup o della perdita dei dati locali è dell’utente.
+    .footer a:hover {
+      text-decoration: underline;
+    }
 
-3. Permessi e funzionalità
-L’app utilizza l’accesso a Internet esclusivamente per:
+    @media (max-width: 600px) {
+      .app-shell {
+        padding: 14px 14px 16px;
+      }
 
-Aprire link esterni verso JW Library o jw.org quando l’utente tocca un riferimento biblico.
+      .header-title {
+        font-size: 1.1rem;
+      }
 
-Bible Notes non invia informazioni personali a tali siti; l’apertura dei link avviene tramite il browser o le app ufficiali presenti sul dispositivo.
+      .content {
+        font-size: 0.9rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="header">
+      <div>
+        <div class="header-title">Informativa sulla privacy</div>
+        <div class="header-subtitle">App Bible Notes</div>
+      </div>
+      <span class="badge">Ultimo aggiornamento: 17 febbraio 2026</span>
+    </header>
 
-4. Condivisione dei dati con terze parti
-Lo sviluppatore non condivide con terze parti:
+    <main class="content">
+      <section>
+        <p><strong>Bible Notes</strong> è un’applicazione di note per lo studio biblico sviluppata da Lorenzo Gabriel (di seguito “sviluppatore”). Questa informativa descrive come l’app gestisce i dati degli utenti.</p>
+      </section>
 
-Dati personali
+      <section>
+        <h2 class="section-title">1. Dati raccolti</h2>
+        <p>L’app Bible Notes <strong>non raccoglie né invia</strong> alcun dato personale a server esterni.</p>
+        <ul>
+          <li>Non è richiesto alcun account o registrazione.</li>
+          <li>Non vengono raccolti nome, email, numero di telefono o altri dati identificativi.</li>
+          <li>Non vengono integrati servizi di analisi di terze parti né SDK pubblicitari.</li>
+        </ul>
+      </section>
 
-Contenuti delle note
+      <section>
+        <h2 class="section-title">2. Dati salvati sul dispositivo</h2>
+        <p>Tutti i contenuti creati dall’utente vengono salvati <strong>solo sul dispositivo</strong>, ad esempio tramite memoria locale (localStorage).</p>
+        <p>Questi dati possono includere:</p>
+        <ul>
+          <li>Note di testo e contenuti inseriti dall’utente.</li>
+          <li>Evidenziazioni e formattazione del testo.</li>
+          <li>Etichette (tag) associate alle note.</li>
+          <li>Riferimenti biblici e preferenze dell’app (es. modalità di apertura dei versetti).</li>
+        </ul>
+        <p>Tali dati non vengono sincronizzati automaticamente su server esterni dallo sviluppatore. La gestione di backup e ripristino del dispositivo è a carico dell’utente.</p>
+      </section>
 
-Etichette o riferimenti biblici
+      <section>
+        <h2 class="section-title">3. Permessi e funzionalità</h2>
+        <p>L’app utilizza l’accesso a Internet esclusivamente per:</p>
+        <ul>
+          <li>Aprire link esterni verso JW Library o jw.org quando l’utente tocca un riferimento biblico.</li>
+        </ul>
+        <p>Bible Notes non invia informazioni personali a tali siti; l’apertura dei link avviene tramite il browser o le app ufficiali già installate sul dispositivo.</p>
+      </section>
 
-Eventuali dati gestiti dai siti esterni (ad es. jw.org, JW Library) sono soggetti alle rispettive informative sulla privacy, che sono indipendenti da questa app.
+      <section>
+        <h2 class="section-title">4. Condivisione dei dati con terze parti</h2>
+        <p>Lo sviluppatore <strong>non condivide</strong> con terze parti:</p>
+        <ul>
+          <li>Dati personali degli utenti.</li>
+          <li>Contenuti delle note o delle evidenziazioni.</li>
+          <li>Etichette o riferimenti biblici salvati nell’app.</li>
+        </ul>
+        <p>Eventuali dati gestiti dai siti esterni (ad esempio JW Library, jw.org) sono soggetti alle rispettive informative sulla privacy, indipendenti da questa app.</p>
+      </section>
 
-5. Diritti dell’utente
-Poiché Bible Notes non raccoglie né memorizza dati personali su server esterni, l’utente:
+      <section>
+        <h2 class="section-title">5. Diritti dell’utente</h2>
+        <p>Poiché Bible Notes non raccoglie né memorizza dati personali su server esterni:</p>
+        <ul>
+          <li>L’utente non deve richiedere allo sviluppatore l’esportazione o la cancellazione dei propri dati, poiché questi risiedono soltanto sul dispositivo.</li>
+          <li>L’utente può cancellare le note e i dati associati direttamente dall’app o disinstallando l’app dal dispositivo.</li>
+        </ul>
+      </section>
 
-Non deve richiedere la cancellazione o esportazione dei dati allo sviluppatore, perché i dati risiedono solo sul dispositivo.
+      <section>
+        <h2 class="section-title">6. Sicurezza</h2>
+        <p>I dati sono memorizzati localmente sul dispositivo e non sono accessibili allo sviluppatore. Si raccomanda all’utente di:</p>
+        <ul>
+          <li>Proteggere il dispositivo con adeguate misure di sicurezza (PIN, impronta digitale, ecc.).</li>
+          <li>Effettuare backup periodici del dispositivo, se desidera conservare una copia delle note.</li>
+        </ul>
+      </section>
 
-Può cancellare tutte le note e i dati associati disinstallando l’app o utilizzando le funzioni interne dell’app (es. eliminazione note).
+      <section>
+        <h2 class="section-title">7. Modifiche a questa informativa</h2>
+        <p>La presente informativa sulla privacy può essere aggiornata in futuro. Eventuali modifiche rilevanti saranno rese disponibili tramite una nuova versione di questa pagina o tramite aggiornamenti dell’app.</p>
+      </section>
 
-6. Sicurezza
-I dati sono memorizzati localmente sul dispositivo. Lo sviluppatore non ha accesso diretto a tali dati.
-Si raccomanda all’utente di:
+      <section>
+        <h2 class="section-title">8. Contatti</h2>
+        <p>Per domande su questa informativa o sull’app Bible Notes, puoi contattare lo sviluppatore all’indirizzo email:</p>
+        <p><strong>debarilorenzogabriel@gmail.com</strong></p>
+      </section>
+    </main>
 
-Proteggere il proprio dispositivo con adeguate misure di sicurezza (PIN, impronta, ecc.).
-
-Effettuare backup del dispositivo, se desidera conservare una copia delle note.
-
-7. Modifiche a questa informativa
-La presente informativa sulla privacy può essere aggiornata in futuro.
-In caso di modifiche significative, la nuova versione sarà pubblicata insieme alla nuova versione dell’app.
-
-8. Contatti
-Per domande su questa informativa o sull’app Bible Notes, puoi contattare lo sviluppatore all’indirizzo email:
-
-debarilorenzogabriel@gmail.com (sostituisci con l’indirizzo che preferisci usare come contatto).
-
+    <footer class="footer">
+      <span>Bible Notes – Informativa sulla privacy</span>
+      <span>Ultimo aggiornamento: 17 febbraio 2026</span>
+    </footer>
+  </div>
+</body>
+</html>
