@@ -407,7 +407,7 @@ fun SettingsScreen(
                     onClick = { pendingImportPayload = null },
                     modifier = Modifier.testTag("cancel_import_button")
                 ) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             }
         )
@@ -448,7 +448,7 @@ fun SettingsScreen(
             text = { Text(strings.backupRestoreSafetyConfirmBody) },
             dismissButton = {
                 TextButton(onClick = { showSafetyRestoreConfirm = false }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {

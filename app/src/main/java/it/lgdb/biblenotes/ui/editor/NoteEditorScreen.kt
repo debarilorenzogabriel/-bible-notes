@@ -193,6 +193,7 @@ fun NoteEditorScreen(
                 navigationIcon = {
                     IconButton(
                         onClick = { viewModel.saveAndClose(silentIfEmpty = true) },
+                        enabled = !state.isSaving,
                         modifier = Modifier.testTag("editor_back_button")
                     ) {
                         Icon(
@@ -233,6 +234,7 @@ fun NoteEditorScreen(
                         if (state.isReadOnlyMode) {
                             FilledTonalButton(
                                 onClick = { viewModel.enterEditMode() },
+                                enabled = !state.isSaving,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier
                                     .padding(end = 4.dp)
@@ -249,6 +251,7 @@ fun NoteEditorScreen(
                         } else {
                             IconButton(
                                 onClick = { viewModel.toggleReadOnlyMode() },
+                                enabled = !state.isSaving,
                                 modifier = Modifier.testTag("toggle_read_mode_button")
                             ) {
                                 Icon(
@@ -258,6 +261,7 @@ fun NoteEditorScreen(
                             }
                             TextButton(
                                 onClick = { viewModel.saveAndClose(silentIfEmpty = false) },
+                                enabled = !state.isSaving,
                                 modifier = Modifier.testTag("save_note_button")
                             ) {
                                 Icon(
@@ -274,6 +278,7 @@ fun NoteEditorScreen(
                     Box {
                         IconButton(
                             onClick = { showOverflowMenu = true },
+                            enabled = !state.isSaving,
                             modifier = Modifier.testTag("editor_overflow_button")
                         ) {
                             Icon(
@@ -282,15 +287,16 @@ fun NoteEditorScreen(
                             )
                         }
                         DropdownMenu(
-                            expanded = showOverflowMenu,
+                            expanded = showOverflowMenu && !state.isSaving,
                             onDismissRequest = { showOverflowMenu = false }
                         ) {
                             if (!state.isCorrupted && (!state.isReadOnlyMode || state.hasUnsavedChanges)) {
                                 DropdownMenuItem(
-                                    text = { Text(strings.cancel) },
+                                    text = { Text(strings.discardChangesAction) },
                                     leadingIcon = {
                                         Icon(Icons.Filled.Close, contentDescription = null)
                                     },
+                                    enabled = !state.isSaving,
                                     onClick = {
                                         showOverflowMenu = false
                                         if (state.hasUnsavedChanges) {
@@ -366,7 +372,7 @@ fun NoteEditorScreen(
                 BasicTextField(
                     value = state.title,
                     onValueChange = viewModel::onTitleChanged,
-                    enabled = !state.isReadOnlyMode && !state.isCorrupted,
+                    enabled = !state.isReadOnlyMode && !state.isCorrupted && !state.isSaving,
                     singleLine = true,
                     textStyle = TextStyle(
                         color = MaterialTheme.colorScheme.onBackground,
@@ -425,12 +431,10 @@ fun NoteEditorScreen(
                 content = state.richContent,
                 textFieldValue = state.textFieldValue,
                 isReadOnly = state.isReadOnlyMode || state.isCorrupted,
+                isEnabled = !state.isSaving,
                 placeholder = strings.bodyPlaceholder,
                 onValueChange = viewModel::onBodyValueChanged,
                 onReferenceTap = openReference,
-                onEnterEditMode = {
-                    if (!state.isCorrupted) viewModel.enterEditMode()
-                },
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -522,11 +526,12 @@ fun NoteEditorScreen(
             text = { Text(strings.confirmDeleteBody) },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {
                 TextButton(
+                    enabled = !state.isSaving,
                     onClick = {
                         showDeleteConfirm = false
                         viewModel.deleteAndClose()
@@ -545,11 +550,12 @@ fun NoteEditorScreen(
             text = { Text(strings.confirmDiscardBody) },
             dismissButton = {
                 TextButton(onClick = { showDiscardConfirm = false }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {
                 TextButton(
+                    enabled = !state.isSaving,
                     onClick = {
                         showDiscardConfirm = false
                         viewModel.discardAndClose()
@@ -640,10 +646,10 @@ private fun RichNoteBodyArea(
     content: RichNoteContent,
     textFieldValue: TextFieldValue,
     isReadOnly: Boolean,
+    isEnabled: Boolean,
     placeholder: String,
     onValueChange: (TextFieldValue) -> Unit,
     onReferenceTap: (BibleRefSpan) -> Unit,
-    onEnterEditMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val extraColors = LocalBibleNotesExtraColors.current
@@ -660,7 +666,7 @@ private fun RichNoteBodyArea(
         Surface(
             shape = RoundedCornerShape(8.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-            modifier = modifier.clickable(onClick = onEnterEditMode)
+            modifier = modifier
         ) {
             Box(
                 modifier = Modifier
@@ -702,6 +708,7 @@ private fun RichNoteBodyArea(
             BasicTextField(
                 value = textFieldValue,
                 onValueChange = onValueChange,
+                enabled = isEnabled,
                 textStyle = TextStyle(
                     color = textColor,
                     fontSize = 15.sp,

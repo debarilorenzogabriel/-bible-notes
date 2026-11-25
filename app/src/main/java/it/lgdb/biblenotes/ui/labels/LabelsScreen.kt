@@ -165,7 +165,7 @@ fun LabelsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNewLabelDialog = false }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {
@@ -199,7 +199,7 @@ fun LabelsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { renameTarget = null }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {
@@ -225,7 +225,7 @@ fun LabelsScreen(
             text = { Text(strings.deleteLabelDialogBody.replace("{name}", target)) },
             dismissButton = {
                 TextButton(onClick = { deleteTarget = null }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {

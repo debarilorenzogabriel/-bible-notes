@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import it.lgdb.biblenotes.domain.BackupPayload
 import it.lgdb.biblenotes.domain.BackupSerializer
+import it.lgdb.biblenotes.domain.DraftEpochCoordinator
 import it.lgdb.biblenotes.domain.NoteSorter
 import it.lgdb.biblenotes.model.AppLanguage
 import it.lgdb.biblenotes.model.DraftRecord
@@ -33,10 +34,15 @@ class NotesRepository(context: Context) {
     private val dbHelper = NotesDatabaseHelper(appContext)
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val safetyBackupFile = File(appContext.filesDir, SAFETY_BACKUP_FILENAME)
+    private val draftCoordinator = DraftEpochCoordinator()
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }
+
+    fun currentDraftEpoch(noteKey: String): Long = draftCoordinator.currentEpoch(noteKey)
+
+    fun invalidateDraftEpoch(noteKey: String): Long = draftCoordinator.invalidateEpoch(noteKey)
 
     suspend fun getAllNotes(sortOption: NoteSortOption = getSortOption()): List<NoteRecord> =
         withContext(Dispatchers.IO) {
@@ -101,67 +107,96 @@ class NotesRepository(context: Context) {
         val db = dbHelper.writableDatabase
         db.beginTransaction()
         try {
-            // Verify we are not overwriting a corrupted stored row
-            db.query(
-                NotesDatabaseHelper.TABLE_NOTES,
-                arrayOf(NotesDatabaseHelper.COL_RICH_CONTENT_JSON),
-                "${NotesDatabaseHelper.COL_ID} = ?",
-                arrayOf(note.id),
-                null,
-                null,
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val existingJson = cursor.getString(0)
-                    val decoded = runCatching { json.decodeFromString<RichNoteContent>(existingJson) }
-                    if (decoded.isFailure) {
-                        error("Corrupted stored note cannot be overwritten")
-                    }
-                }
-            }
-
-            val knownLabels = readLabelsTableInternal(db)
-            val canonicalTags = canonicalizeTags(note.tags, knownLabels)
-
-            val values = noteContentValues(note.copy(tags = canonicalTags))
-            db.insertWithOnConflict(
-                NotesDatabaseHelper.TABLE_NOTES,
-                null,
-                values,
-                SQLiteDatabase.CONFLICT_REPLACE
-            )
-
-            canonicalTags.forEach { tag ->
-                insertLabelIfAbsentCaseInsensitive(db, tag)
-            }
+            saveNoteInternal(db, note)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
     }
 
-    suspend fun moveNoteToTrash(id: String) = withContext(Dispatchers.IO) {
-        val db = dbHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            val values = ContentValues().apply {
-                put(NotesDatabaseHelper.COL_DELETED_AT, System.currentTimeMillis())
-                put(NotesDatabaseHelper.COL_PINNED, 0)
+    suspend fun saveNoteAndDeleteDraft(note: NoteRecord, draftKey: String) {
+        require(!note.isCorrupted) { "Corrupted note cannot be overwritten" }
+        draftCoordinator.invalidateAndExecuteExclusive(draftKey) {
+            withContext(Dispatchers.IO) {
+                val db = dbHelper.writableDatabase
+                db.beginTransaction()
+                try {
+                    saveNoteInternal(db, note)
+                    db.delete(
+                        NotesDatabaseHelper.TABLE_DRAFTS,
+                        "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                        arrayOf(draftKey)
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
             }
-            db.update(
-                NotesDatabaseHelper.TABLE_NOTES,
-                values,
-                "${NotesDatabaseHelper.COL_ID} = ?",
-                arrayOf(id)
-            )
-            db.delete(
-                NotesDatabaseHelper.TABLE_DRAFTS,
-                "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
-                arrayOf(id)
-            )
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+        }
+    }
+
+    private fun saveNoteInternal(db: SQLiteDatabase, note: NoteRecord) {
+        // Verify we are not overwriting a corrupted stored row
+        db.query(
+            NotesDatabaseHelper.TABLE_NOTES,
+            arrayOf(NotesDatabaseHelper.COL_RICH_CONTENT_JSON),
+            "${NotesDatabaseHelper.COL_ID} = ?",
+            arrayOf(note.id),
+            null,
+            null,
+            null
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                val existingJson = cursor.getString(0)
+                val decoded = runCatching { json.decodeFromString<RichNoteContent>(existingJson) }
+                if (decoded.isFailure) {
+                    error("Corrupted stored note cannot be overwritten")
+                }
+            }
+        }
+
+        val knownLabels = readLabelsTableInternal(db)
+        val canonicalTags = canonicalizeTags(note.tags, knownLabels)
+
+        val values = noteContentValues(note.copy(tags = canonicalTags))
+        db.insertWithOnConflict(
+            NotesDatabaseHelper.TABLE_NOTES,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+
+        canonicalTags.forEach { tag ->
+            insertLabelIfAbsentCaseInsensitive(db, tag)
+        }
+    }
+
+    suspend fun moveNoteToTrash(id: String) {
+        draftCoordinator.invalidateAndExecuteExclusive(id) {
+            withContext(Dispatchers.IO) {
+                val db = dbHelper.writableDatabase
+                db.beginTransaction()
+                try {
+                    val values = ContentValues().apply {
+                        put(NotesDatabaseHelper.COL_DELETED_AT, System.currentTimeMillis())
+                        put(NotesDatabaseHelper.COL_PINNED, 0)
+                    }
+                    db.update(
+                        NotesDatabaseHelper.TABLE_NOTES,
+                        values,
+                        "${NotesDatabaseHelper.COL_ID} = ?",
+                        arrayOf(id)
+                    )
+                    db.delete(
+                        NotesDatabaseHelper.TABLE_DRAFTS,
+                        "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                        arrayOf(id)
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
         }
     }
 
@@ -178,23 +213,27 @@ class NotesRepository(context: Context) {
         )
     }
 
-    suspend fun permanentlyDeleteNote(id: String) = withContext(Dispatchers.IO) {
-        val db = dbHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            db.delete(
-                NotesDatabaseHelper.TABLE_NOTES,
-                "${NotesDatabaseHelper.COL_ID} = ?",
-                arrayOf(id)
-            )
-            db.delete(
-                NotesDatabaseHelper.TABLE_DRAFTS,
-                "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
-                arrayOf(id)
-            )
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+    suspend fun permanentlyDeleteNote(id: String) {
+        draftCoordinator.invalidateAndExecuteExclusive(id) {
+            withContext(Dispatchers.IO) {
+                val db = dbHelper.writableDatabase
+                db.beginTransaction()
+                try {
+                    db.delete(
+                        NotesDatabaseHelper.TABLE_NOTES,
+                        "${NotesDatabaseHelper.COL_ID} = ?",
+                        arrayOf(id)
+                    )
+                    db.delete(
+                        NotesDatabaseHelper.TABLE_DRAFTS,
+                        "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                        arrayOf(id)
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
         }
     }
 
@@ -239,30 +278,39 @@ class NotesRepository(context: Context) {
         }
     }
 
-    suspend fun saveDraft(draft: DraftRecord) = withContext(Dispatchers.IO) {
-        val db = dbHelper.writableDatabase
-        val values = ContentValues().apply {
-            put(NotesDatabaseHelper.COL_DRAFT_KEY, draft.noteKey)
-            put(NotesDatabaseHelper.COL_TITLE, draft.title)
-            put(NotesDatabaseHelper.COL_RICH_CONTENT_JSON, json.encodeToString(RichNoteContent.serializer(), draft.content))
-            put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(draft.tags))
-            put(NotesDatabaseHelper.COL_UPDATED_AT, draft.updatedAt)
+    suspend fun saveDraft(draft: DraftRecord, expectedEpoch: Long? = null): Boolean {
+        val targetEpoch = expectedEpoch ?: currentDraftEpoch(draft.noteKey)
+        return draftCoordinator.writeDraftIfEpochCurrent(draft.noteKey, targetEpoch) {
+            withContext(Dispatchers.IO) {
+                val db = dbHelper.writableDatabase
+                val values = ContentValues().apply {
+                    put(NotesDatabaseHelper.COL_DRAFT_KEY, draft.noteKey)
+                    put(NotesDatabaseHelper.COL_TITLE, draft.title)
+                    put(NotesDatabaseHelper.COL_RICH_CONTENT_JSON, json.encodeToString(RichNoteContent.serializer(), draft.content))
+                    put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(draft.tags))
+                    put(NotesDatabaseHelper.COL_UPDATED_AT, draft.updatedAt)
+                }
+                db.insertWithOnConflict(
+                    NotesDatabaseHelper.TABLE_DRAFTS,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_REPLACE
+                )
+            }
         }
-        db.insertWithOnConflict(
-            NotesDatabaseHelper.TABLE_DRAFTS,
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_REPLACE
-        )
     }
 
-    suspend fun deleteDraft(noteKey: String) = withContext(Dispatchers.IO) {
-        val db = dbHelper.writableDatabase
-        db.delete(
-            NotesDatabaseHelper.TABLE_DRAFTS,
-            "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
-            arrayOf(noteKey)
-        )
+    suspend fun deleteDraft(noteKey: String) {
+        draftCoordinator.invalidateAndExecuteExclusive(noteKey) {
+            withContext(Dispatchers.IO) {
+                val db = dbHelper.writableDatabase
+                db.delete(
+                    NotesDatabaseHelper.TABLE_DRAFTS,
+                    "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                    arrayOf(noteKey)
+                )
+            }
+        }
     }
 
     suspend fun importBackup(payload: BackupPayload, mode: ImportMode): ImportSummary =

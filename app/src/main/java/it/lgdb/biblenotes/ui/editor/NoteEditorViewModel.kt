@@ -7,8 +7,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import it.lgdb.biblenotes.data.NotesRepository
 import it.lgdb.biblenotes.domain.BibleBook
+import it.lgdb.biblenotes.domain.EditOperationKind
 import it.lgdb.biblenotes.domain.OpenBibleResult
 import it.lgdb.biblenotes.domain.SpanAdjuster
+import it.lgdb.biblenotes.domain.UndoHistoryManager
 import it.lgdb.biblenotes.domain.editorStrings
 import it.lgdb.biblenotes.model.AppLanguage
 import it.lgdb.biblenotes.model.BibleRefSpan
@@ -44,6 +46,7 @@ data class EditorSnapshot(
 
 data class NoteEditorUiState(
     val activeNoteId: String? = null,
+    val draftSessionNoteId: String = "",
     val createdAt: Long? = null,
     val pinned: Boolean = false,
     val title: String = "",
@@ -58,6 +61,7 @@ data class NoteEditorUiState(
     val themeOption: ThemeOption = ThemeOption.LIGHT,
     val language: AppLanguage = AppLanguage.IT,
     val hasUnsavedChanges: Boolean = false,
+    val isSaving: Boolean = false,
     val draftStatus: DraftStatus = DraftStatus.IDLE,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false
@@ -72,7 +76,8 @@ sealed interface EditorEvent {
 }
 
 class NoteEditorViewModel(
-    private val repository: NotesRepository
+    private val repository: NotesRepository,
+    private val currentTimeMs: () -> Long = { System.currentTimeMillis() }
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -88,10 +93,14 @@ class NoteEditorViewModel(
     val events: SharedFlow<EditorEvent> = _events.asSharedFlow()
 
     private var baselineSnapshot: EditorSnapshot = EditorSnapshot("", RichNoteContent(), TextRange.Zero, emptyList())
-    private val undoStack = ArrayDeque<EditorSnapshot>()
-    private val redoStack = ArrayDeque<EditorSnapshot>()
-    private var lastTypingPushTimeMs: Long = 0L
+    private val undoHistory = UndoHistoryManager<EditorSnapshot>(
+        maxSteps = MAX_UNDO_STEPS,
+        pauseCoalesceMs = TYPING_COALESCE_MS,
+        maxGroupDurationMs = MAX_TYPING_GROUP_MS
+    )
     private var autosaveJob: Job? = null
+    private var draftFlushJob: Job? = null
+    private var isSessionActive: Boolean = false
 
     fun loadSession(
         noteId: String?,
@@ -100,9 +109,11 @@ class NoteEditorViewModel(
         language: AppLanguage
     ) {
         autosaveJob?.cancel()
-        undoStack.clear()
-        redoStack.clear()
-        lastTypingPushTimeMs = 0L
+        draftFlushJob?.cancel()
+        undoHistory.clear()
+        isSessionActive = true
+
+        val stableNewId = noteId ?: "${currentTimeMs()}-${UUID.randomUUID().toString().take(8)}"
 
         viewModelScope.launch {
             val strings = editorStrings(language)
@@ -119,6 +130,7 @@ class NoteEditorViewModel(
                 baselineSnapshot = EditorSnapshot("", RichNoteContent(), TextRange.Zero, emptyList())
                 if (draft != null && isDraftNonEmpty(draft)) {
                     _uiState.value = NoteEditorUiState(
+                        draftSessionNoteId = stableNewId,
                         title = draft.title,
                         richContent = draft.content,
                         textFieldValue = TextFieldValue(
@@ -132,15 +144,18 @@ class NoteEditorViewModel(
                         themeOption = themeOption,
                         language = language,
                         hasUnsavedChanges = true,
+                        isSaving = false,
                         draftStatus = DraftStatus.SAVED
                     )
                     emitEvent(EditorEvent.ShowMessage(strings.draftRecoveredMessage))
                 } else {
                     _uiState.value = NoteEditorUiState(
+                        draftSessionNoteId = stableNewId,
                         availableTags = allTags,
                         openWithJwLibrary = openWithJwLibrary,
                         themeOption = themeOption,
-                        language = language
+                        language = language,
+                        isSaving = false
                     )
                 }
                 return@launch
@@ -149,11 +164,13 @@ class NoteEditorViewModel(
             val noteResult = runCatching { repository.getNoteById(noteId) }
             noteResult.onFailure { err ->
                 _uiState.value = NoteEditorUiState(
+                    draftSessionNoteId = stableNewId,
                     availableTags = allTags,
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
-                    isReadOnlyMode = true
+                    isReadOnlyMode = true,
+                    isSaving = false
                 )
                 emitEvent(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
                 return@launch
@@ -163,10 +180,12 @@ class NoteEditorViewModel(
             if (note == null) {
                 baselineSnapshot = EditorSnapshot("", RichNoteContent(), TextRange.Zero, emptyList())
                 _uiState.value = NoteEditorUiState(
+                    draftSessionNoteId = "${currentTimeMs()}-${UUID.randomUUID().toString().take(8)}",
                     availableTags = allTags,
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
-                    language = language
+                    language = language,
+                    isSaving = false
                 )
                 return@launch
             }
@@ -175,6 +194,7 @@ class NoteEditorViewModel(
                 baselineSnapshot = EditorSnapshot(note.title, note.content, TextRange.Zero, note.tags)
                 _uiState.value = NoteEditorUiState(
                     activeNoteId = note.id,
+                    draftSessionNoteId = note.id,
                     createdAt = note.createdAt,
                     pinned = note.pinned,
                     title = note.title,
@@ -188,7 +208,8 @@ class NoteEditorViewModel(
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
-                    hasUnsavedChanges = false
+                    hasUnsavedChanges = false,
+                    isSaving = false
                 )
                 emitEvent(EditorEvent.ShowMessage(strings.corruptedNoteTitle))
                 return@launch
@@ -210,6 +231,7 @@ class NoteEditorViewModel(
             if (draft != null && draftMatchesChange) {
                 _uiState.value = NoteEditorUiState(
                     activeNoteId = note.id,
+                    draftSessionNoteId = note.id,
                     createdAt = note.createdAt,
                     pinned = note.pinned,
                     title = draft.title,
@@ -225,12 +247,14 @@ class NoteEditorViewModel(
                     themeOption = themeOption,
                     language = language,
                     hasUnsavedChanges = true,
+                    isSaving = false,
                     draftStatus = DraftStatus.SAVED
                 )
                 emitEvent(EditorEvent.ShowMessage(strings.draftRecoveredMessage))
             } else {
                 _uiState.value = NoteEditorUiState(
                     activeNoteId = note.id,
+                    draftSessionNoteId = note.id,
                     createdAt = note.createdAt,
                     pinned = note.pinned,
                     title = note.title,
@@ -245,7 +269,8 @@ class NoteEditorViewModel(
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
-                    hasUnsavedChanges = false
+                    hasUnsavedChanges = false,
+                    isSaving = false
                 )
             }
         }
@@ -253,24 +278,44 @@ class NoteEditorViewModel(
 
     fun onTitleChanged(newTitle: String) {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted || current.title == newTitle) return
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted || current.title == newTitle) return
 
-        pushUndoSnapshot(coalesceTyping = true)
+        val (kind, editOffset, nextExpected) = UndoHistoryManager.classifyTitleEdit(current.title, newTitle)
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = kind,
+            nowMs = currentTimeMs(),
+            editOffset = editOffset,
+            nextExpectedCursor = nextExpected
+        )
+
         _uiState.update { state ->
-            val updated = state.copy(title = newTitle)
-            applyDirtyAndHistoryFlags(updated)
+            applyDirtyAndHistoryFlags(state.copy(title = newTitle))
         }
         scheduleDraftAutosave()
     }
 
     fun onBodyValueChanged(newValue: TextFieldValue) {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted) return
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
 
         val textChanged = newValue.text != current.richContent.text
-        if (textChanged) {
-            val largeJump = kotlin.math.abs(newValue.text.length - current.richContent.text.length) > 1
-            pushUndoSnapshot(coalesceTyping = !largeJump)
+        if (!textChanged) {
+            if (newValue.selection != current.textFieldValue.selection) {
+                undoHistory.onCursorMoved()
+            }
+        } else {
+            val (kind, editOffset, nextExpected) = UndoHistoryManager.classifyBodyEdit(
+                oldValue = current.textFieldValue,
+                newValue = newValue
+            )
+            undoHistory.recordBeforeEdit(
+                snapshotBeforeEdit = current.toSnapshot(),
+                kind = kind,
+                nowMs = currentTimeMs(),
+                editOffset = editOffset,
+                nextExpectedCursor = nextExpected
+            )
         }
 
         _uiState.update { state ->
@@ -293,7 +338,7 @@ class NoteEditorViewModel(
 
     fun applyHighlight(color: HighlightColor?) {
         val state = _uiState.value
-        if (state.isReadOnlyMode || state.isCorrupted) return
+        if (state.isSaving || state.isReadOnlyMode || state.isCorrupted) return
 
         val sel = state.textFieldValue.selection
         if (sel.collapsed) {
@@ -309,7 +354,11 @@ class NoteEditorViewModel(
         )
         if (updatedContent == state.richContent) return
 
-        pushUndoSnapshot(coalesceTyping = false)
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = state.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
         _uiState.update {
             applyDirtyAndHistoryFlags(it.copy(richContent = updatedContent))
         }
@@ -318,9 +367,13 @@ class NoteEditorViewModel(
 
     fun insertBibleReference(book: BibleBook, chapter: Int, verseSpec: String?) {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted) return
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
 
-        pushUndoSnapshot(coalesceTyping = false)
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
         _uiState.update { state ->
             val sel = state.textFieldValue.selection
             val localizedBook = book.localizedName(state.language)
@@ -348,7 +401,7 @@ class NoteEditorViewModel(
 
     fun addTag(rawTag: String) {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted) return
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
 
         val cleaned = rawTag.trim()
         if (cleaned.isEmpty()) return
@@ -358,7 +411,11 @@ class NoteEditorViewModel(
             it.equals(cleaned, ignoreCase = true)
         } ?: cleaned
 
-        pushUndoSnapshot(coalesceTyping = false)
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
         _uiState.update { state ->
             applyDirtyAndHistoryFlags(state.copy(tags = state.tags + canonical))
         }
@@ -367,10 +424,14 @@ class NoteEditorViewModel(
 
     fun removeTag(tag: String) {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted) return
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
         if (current.tags.none { it.equals(tag, ignoreCase = true) }) return
 
-        pushUndoSnapshot(coalesceTyping = false)
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
         _uiState.update { state ->
             applyDirtyAndHistoryFlags(
                 state.copy(tags = state.tags.filterNot { it.equals(tag, ignoreCase = true) })
@@ -381,11 +442,8 @@ class NoteEditorViewModel(
 
     fun undo() {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted || undoStack.isEmpty()) return
-
-        redoStack.addLast(current.toSnapshot())
-        val previous = undoStack.removeLast()
-        lastTypingPushTimeMs = 0L
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
+        val previous = undoHistory.undo(current.toSnapshot()) ?: return
 
         _uiState.update { state ->
             applyDirtyAndHistoryFlags(
@@ -408,11 +466,8 @@ class NoteEditorViewModel(
 
     fun redo() {
         val current = _uiState.value
-        if (current.isReadOnlyMode || current.isCorrupted || redoStack.isEmpty()) return
-
-        undoStack.addLast(current.toSnapshot())
-        val next = redoStack.removeLast()
-        lastTypingPushTimeMs = 0L
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
+        val next = undoHistory.redo(current.toSnapshot()) ?: return
 
         _uiState.update { state ->
             applyDirtyAndHistoryFlags(
@@ -435,21 +490,27 @@ class NoteEditorViewModel(
 
     fun toggleReadOnlyMode() {
         val state = _uiState.value
-        if (state.isCorrupted) return
+        if (state.isSaving || state.isCorrupted) return
+        undoHistory.onCursorMoved()
         _uiState.update { it.copy(isReadOnlyMode = !it.isReadOnlyMode) }
     }
 
     fun enterEditMode() {
         val state = _uiState.value
-        if (state.isCorrupted) return
+        if (state.isSaving || state.isCorrupted) return
+        undoHistory.onCursorMoved()
         _uiState.update { it.copy(isReadOnlyMode = false) }
     }
 
     fun saveAndClose(silentIfEmpty: Boolean) {
         val state = _uiState.value
+        if (state.isSaving) return
         val strings = editorStrings(state.language)
 
         if (state.isCorrupted) {
+            isSessionActive = false
+            autosaveJob?.cancel()
+            draftFlushJob?.cancel()
             emitEvent(EditorEvent.CloseEditor)
             return
         }
@@ -457,14 +518,20 @@ class NoteEditorViewModel(
         val trimmedTitle = state.title.trim()
         val hasBody = state.richContent.text.isNotBlank()
         val hasTags = state.tags.isNotEmpty()
+        val draftKey = currentDraftKey(state)
 
         if (!hasBody && trimmedTitle.isEmpty() && !hasTags) {
+            _uiState.update { it.copy(isSaving = true) }
             autosaveJob?.cancel()
+            draftFlushJob?.cancel()
+            repository.invalidateDraftEpoch(draftKey)
             viewModelScope.launch {
-                runCatching { repository.deleteDraft(currentDraftKey(state)) }
+                runCatching { repository.deleteDraft(draftKey) }
                 if (silentIfEmpty) {
+                    isSessionActive = false
                     _events.emit(EditorEvent.CloseEditor)
                 } else {
+                    _uiState.update { it.copy(isSaving = false) }
                     _events.emit(EditorEvent.ShowMessage(strings.emptyNoteError))
                 }
             }
@@ -473,19 +540,29 @@ class NoteEditorViewModel(
 
         // No changes on an existing note -> close immediately without rewriting updatedAt
         if (state.activeNoteId != null && !state.hasUnsavedChanges) {
+            _uiState.update { it.copy(isSaving = true) }
             autosaveJob?.cancel()
+            draftFlushJob?.cancel()
+            repository.invalidateDraftEpoch(draftKey)
             viewModelScope.launch {
                 runCatching { repository.deleteDraft(state.activeNoteId) }
+                isSessionActive = false
                 _events.emit(EditorEvent.CloseEditor)
             }
             return
         }
 
+        _uiState.update { it.copy(isSaving = true) }
         autosaveJob?.cancel()
-        val now = System.currentTimeMillis()
-        val noteId = state.activeNoteId ?: "${now}-${UUID.randomUUID().toString().take(8)}"
+        draftFlushJob?.cancel()
+        repository.invalidateDraftEpoch(draftKey)
+
+        val now = currentTimeMs()
+        val stableId = state.activeNoteId ?: state.draftSessionNoteId.ifBlank {
+            "${now}-${UUID.randomUUID().toString().take(8)}"
+        }
         val record = NoteRecord(
-            id = noteId,
+            id = stableId,
             title = trimmedTitle,
             content = state.richContent,
             tags = state.tags,
@@ -496,11 +573,12 @@ class NoteEditorViewModel(
 
         viewModelScope.launch {
             runCatching {
-                repository.saveNote(record)
-                repository.deleteDraft(currentDraftKey(state))
+                repository.saveNoteAndDeleteDraft(record, draftKey)
             }.onSuccess {
+                isSessionActive = false
                 _events.emit(EditorEvent.CloseEditor)
             }.onFailure { err ->
+                _uiState.update { it.copy(isSaving = false) }
                 _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
             }
         }
@@ -508,27 +586,78 @@ class NoteEditorViewModel(
 
     fun discardAndClose() {
         val state = _uiState.value
+        if (state.isSaving) return
+        val draftKey = currentDraftKey(state)
+
+        _uiState.update { it.copy(isSaving = true) }
         autosaveJob?.cancel()
+        draftFlushJob?.cancel()
+        repository.invalidateDraftEpoch(draftKey)
+
         viewModelScope.launch {
-            runCatching { repository.deleteDraft(currentDraftKey(state)) }
+            runCatching { repository.deleteDraft(draftKey) }
+            isSessionActive = false
             _events.emit(EditorEvent.CloseEditor)
         }
     }
 
     fun deleteAndClose() {
         val state = _uiState.value
+        if (state.isSaving) return
         val strings = editorStrings(state.language)
-        autosaveJob?.cancel()
         val id = state.activeNoteId ?: run {
             discardAndClose()
             return
         }
+
+        _uiState.update { it.copy(isSaving = true) }
+        autosaveJob?.cancel()
+        draftFlushJob?.cancel()
+        repository.invalidateDraftEpoch(id)
+
         viewModelScope.launch {
             runCatching {
                 repository.moveNoteToTrash(id)
             }.onSuccess {
+                isSessionActive = false
                 _events.emit(EditorEvent.CloseEditor)
             }.onFailure { err ->
+                _uiState.update { it.copy(isSaving = false) }
+                _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+            }
+        }
+    }
+
+    fun flushDraftOnBackground() {
+        val latest = _uiState.value
+        if (!isSessionActive || latest.isCorrupted || latest.isReadOnlyMode || latest.isSaving || !latest.hasUnsavedChanges) {
+            return
+        }
+
+        autosaveJob?.cancel()
+        val draftKey = currentDraftKey(latest)
+        val expectedEpoch = repository.currentDraftEpoch(draftKey)
+        val draft = DraftRecord(
+            noteKey = draftKey,
+            title = latest.title,
+            content = latest.richContent,
+            tags = latest.tags,
+            updatedAt = currentTimeMs()
+        )
+        if (!isDraftNonEmpty(draft) && latest.activeNoteId == null) return
+
+        _uiState.update { it.copy(draftStatus = DraftStatus.SAVING) }
+        draftFlushJob?.cancel()
+        draftFlushJob = viewModelScope.launch {
+            val strings = editorStrings(latest.language)
+            runCatching {
+                repository.saveDraft(draft, expectedEpoch)
+            }.onSuccess { written ->
+                if (written && isSessionActive && !_uiState.value.isSaving) {
+                    _uiState.update { it.copy(draftStatus = DraftStatus.SAVED) }
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(draftStatus = DraftStatus.IDLE) }
                 _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
             }
         }
@@ -544,27 +673,14 @@ class NoteEditorViewModel(
         }
     }
 
-    private fun pushUndoSnapshot(coalesceTyping: Boolean) {
-        val now = System.currentTimeMillis()
-        redoStack.clear()
-        if (coalesceTyping && undoStack.isNotEmpty() && (now - lastTypingPushTimeMs) < TYPING_COALESCE_MS) {
-            lastTypingPushTimeMs = now
-            return
-        }
-        undoStack.addLast(_uiState.value.toSnapshot())
-        while (undoStack.size > MAX_UNDO_STEPS) {
-            undoStack.removeFirst()
-        }
-        lastTypingPushTimeMs = if (coalesceTyping) now else 0L
-    }
-
     private fun scheduleDraftAutosave() {
         val snapshotState = _uiState.value
-        if (snapshotState.isCorrupted || snapshotState.isReadOnlyMode) return
+        if (!isSessionActive || snapshotState.isSaving || snapshotState.isCorrupted || snapshotState.isReadOnlyMode) return
 
         autosaveJob?.cancel()
 
         val draftKey = currentDraftKey(snapshotState)
+        val expectedEpoch = repository.currentDraftEpoch(draftKey)
         if (!snapshotState.hasUnsavedChanges) {
             _uiState.update { it.copy(draftStatus = DraftStatus.IDLE) }
             autosaveJob = viewModelScope.launch {
@@ -577,13 +693,15 @@ class NoteEditorViewModel(
         autosaveJob = viewModelScope.launch {
             delay(AUTOSAVE_DEBOUNCE_MS)
             val latest = _uiState.value
-            if (latest.isCorrupted) return@launch
+            if (!isSessionActive || latest.isCorrupted || latest.isSaving) return@launch
+            if (repository.currentDraftEpoch(draftKey) != expectedEpoch) return@launch
+
             val draft = DraftRecord(
-                noteKey = currentDraftKey(latest),
+                noteKey = draftKey,
                 title = latest.title,
                 content = latest.richContent,
                 tags = latest.tags,
-                updatedAt = System.currentTimeMillis()
+                updatedAt = currentTimeMs()
             )
             val strings = editorStrings(latest.language)
             runCatching {
@@ -591,11 +709,13 @@ class NoteEditorViewModel(
                     repository.deleteDraft(draft.noteKey)
                     DraftStatus.IDLE
                 } else {
-                    repository.saveDraft(draft)
-                    DraftStatus.SAVED
+                    val written = repository.saveDraft(draft, expectedEpoch)
+                    if (written) DraftStatus.SAVED else latest.draftStatus
                 }
             }.onSuccess { status ->
-                _uiState.update { it.copy(draftStatus = status) }
+                if (isSessionActive && !_uiState.value.isSaving) {
+                    _uiState.update { it.copy(draftStatus = status) }
+                }
             }.onFailure { err ->
                 _uiState.update { it.copy(draftStatus = DraftStatus.IDLE) }
                 _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
@@ -609,8 +729,8 @@ class NoteEditorViewModel(
             state.tags != baselineSnapshot.tags
         return state.copy(
             hasUnsavedChanges = isDirty,
-            canUndo = undoStack.isNotEmpty(),
-            canRedo = redoStack.isNotEmpty()
+            canUndo = undoHistory.canUndo,
+            canRedo = undoHistory.canRedo
         )
     }
 
@@ -646,6 +766,7 @@ class NoteEditorViewModel(
     companion object {
         private const val AUTOSAVE_DEBOUNCE_MS = 700L
         private const val TYPING_COALESCE_MS = 700L
+        private const val MAX_TYPING_GROUP_MS = 4000L
         private const val MAX_UNDO_STEPS = 60
     }
 }

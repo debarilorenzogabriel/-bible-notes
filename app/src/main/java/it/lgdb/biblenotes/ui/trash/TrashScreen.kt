@@ -188,7 +188,7 @@ fun TrashScreen(
             text = { Text(strings.trashEmptyConfirmBody) },
             dismissButton = {
                 TextButton(onClick = { showEmptyConfirm = false }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {
@@ -211,7 +211,7 @@ fun TrashScreen(
             text = { Text(strings.trashDeleteForeverConfirmBody) },
             dismissButton = {
                 TextButton(onClick = { pendingDeleteForeverNote = null }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {

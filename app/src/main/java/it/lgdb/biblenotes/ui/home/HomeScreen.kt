@@ -386,7 +386,7 @@ fun HomeScreen(
             text = { Text(strings.confirmDeleteBody) },
             dismissButton = {
                 TextButton(onClick = { pendingDeleteNote = null }) {
-                    Text(strings.cancel)
+                    Text(strings.cancelAction)
                 }
             },
             confirmButton = {

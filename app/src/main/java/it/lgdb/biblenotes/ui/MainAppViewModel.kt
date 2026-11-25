@@ -235,7 +235,7 @@ class MainAppViewModel(
             runCatching { repository.permanentlyDeleteNote(noteId) }
                 .onSuccess {
                     refreshData()
-                    emitMessage(strings.noteDeletedMessage)
+                    emitMessage(strings.notePermanentlyDeletedMessage)
                 }.onFailure { err ->
                     emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
                 }
