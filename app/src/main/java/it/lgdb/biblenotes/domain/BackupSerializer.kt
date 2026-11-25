@@ -53,16 +53,17 @@ object BackupSerializer {
         labels: List<String>,
         exportedAt: Long = System.currentTimeMillis()
     ): String {
-        val normalizedLabels = (labels + notes.flatMap { it.tags })
+        val activeNotes = notes.filter { it.deletedAt == null && !it.isCorrupted }
+        val normalizedLabels = (labels + activeNotes.flatMap { it.tags })
             .map { it.trim() }
             .filter { it.isNotEmpty() }
-            .distinct()
+            .distinctBy { it.lowercase() }
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
 
         val payload = BackupPayload(
             version = BackupPayload.CURRENT_VERSION,
             exportedAt = exportedAt,
-            notes = notes,
+            notes = activeNotes,
             allLabels = normalizedLabels
         )
         return json.encodeToString(BackupPayload.serializer(), payload)
@@ -91,7 +92,7 @@ object BackupSerializer {
         val combinedLabels = (rawLabels + parsedNotes.flatMap { it.tags })
             .map { it.trim() }
             .filter { it.isNotEmpty() }
-            .distinct()
+            .distinctBy { it.lowercase() }
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
 
         BackupPayload(
@@ -114,7 +115,7 @@ object BackupSerializer {
             val decoded = json.decodeFromJsonElement(NoteRecord.serializer(), obj)
             return decoded.copy(
                 id = decoded.id.ifBlank { UUID.randomUUID().toString() },
-                tags = decoded.tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+                tags = decoded.tags.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
             )
         }
 
@@ -128,7 +129,7 @@ object BackupSerializer {
         val legacyTags = (obj["tags"] as? JsonArray)
             ?.mapNotNull { it.asStringOrNull()?.trim() }
             ?.filter { it.isNotEmpty() }
-            ?.distinct()
+            ?.distinctBy { it.lowercase() }
             .orEmpty()
 
         val createdAt = obj["createdAt"].asLongOrNull() ?: fallbackTimestamp

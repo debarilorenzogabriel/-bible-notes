@@ -27,9 +27,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -55,6 +57,8 @@ import it.lgdb.biblenotes.domain.AppStrings
 import it.lgdb.biblenotes.domain.BackupPayload
 import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.ImportMode
+import it.lgdb.biblenotes.model.ImportSummary
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -69,6 +73,8 @@ fun SettingsScreen(
     openWithJwLibrary: Boolean,
     themeOption: ThemeOption,
     language: AppLanguage,
+    hasSafetyBackup: Boolean,
+    importSummary: ImportSummary?,
     strings: AppStrings,
     onToggleJwLibrary: (Boolean) -> Unit,
     onSelectTheme: (ThemeOption) -> Unit,
@@ -76,7 +82,9 @@ fun SettingsScreen(
     onPrepareBackupJson: suspend () -> String?,
     onConsumePendingExportJson: () -> String?,
     onClearPendingExportJson: () -> Unit,
-    onImportBackup: (BackupPayload) -> Unit,
+    onImportBackup: (BackupPayload, ImportMode) -> Unit,
+    onDismissImportSummary: () -> Unit,
+    onRestoreSafetyBackup: () -> Unit,
     onNotifyMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -84,6 +92,7 @@ fun SettingsScreen(
     val coroutineScope = rememberCoroutineScope()
 
     var pendingImportPayload by remember { mutableStateOf<BackupPayload?>(null) }
+    var showSafetyRestoreConfirm by remember { mutableStateOf(false) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -331,6 +340,24 @@ fun SettingsScreen(
                         Text(strings.settingsExport)
                     }
                 }
+
+                if (hasSafetyBackup) {
+                    OutlinedButton(
+                        onClick = { showSafetyRestoreConfirm = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("restore_safety_backup_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.History,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(strings.backupRestoreSafetyAction)
+                    }
+                }
             }
         }
 
@@ -342,27 +369,94 @@ fun SettingsScreen(
             onDismissRequest = { pendingImportPayload = null },
             title = { Text(strings.backupConfirmTitle) },
             text = {
-                Text(
-                    strings.backupConfirmBody
-                        .replace("{notes}", payload.notes.size.toString())
-                        .replace("{labels}", payload.allLabels.size.toString())
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        strings.backupPreviewSummary
+                            .replace("{notes}", payload.notes.size.toString())
+                            .replace("{labels}", payload.allLabels.size.toString())
+                    )
+                    Button(
+                        onClick = {
+                            pendingImportPayload = null
+                            onImportBackup(payload, ImportMode.MERGE)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("import_merge_button")
+                    ) {
+                        Text(strings.backupMergeAction)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            pendingImportPayload = null
+                            onImportBackup(payload, ImportMode.REPLACE_ALL)
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("import_replace_button")
+                    ) {
+                        Text(strings.backupReplaceAllAction)
+                    }
+                }
             },
-            dismissButton = {
+            confirmButton = {
                 TextButton(
                     onClick = { pendingImportPayload = null },
                     modifier = Modifier.testTag("cancel_import_button")
                 ) {
                     Text(strings.cancel)
                 }
+            }
+        )
+    }
+
+    importSummary?.let { summary ->
+        val body = buildString {
+            append(
+                strings.backupResultBody
+                    .replace("{imported}", summary.importedCount.toString())
+                    .replace("{ignored}", summary.ignoredCount.toString())
+                    .replace("{invalid}", summary.invalidCount.toString())
+                    .replace("{labels}", summary.labelsCount.toString())
+            )
+            if (summary.safetyBackupCreated) {
+                append(strings.backupSafetyBackupNote)
+            }
+        }
+        AlertDialog(
+            onDismissRequest = onDismissImportSummary,
+            title = { Text(strings.backupResultTitle) },
+            text = { Text(body) },
+            confirmButton = {
+                TextButton(
+                    onClick = onDismissImportSummary,
+                    modifier = Modifier.testTag("dismiss_import_summary_button")
+                ) {
+                    Text(strings.closeAction)
+                }
+            }
+        )
+    }
+
+    if (showSafetyRestoreConfirm) {
+        AlertDialog(
+            onDismissRequest = { showSafetyRestoreConfirm = false },
+            title = { Text(strings.backupRestoreSafetyAction) },
+            text = { Text(strings.backupRestoreSafetyConfirmBody) },
+            dismissButton = {
+                TextButton(onClick = { showSafetyRestoreConfirm = false }) {
+                    Text(strings.cancel)
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        pendingImportPayload = null
-                        onImportBackup(payload)
-                    },
-                    modifier = Modifier.testTag("confirm_import_button")
+                        showSafetyRestoreConfirm = false
+                        onRestoreSafetyBackup()
+                    }
                 ) {
                     Text(strings.confirmAction)
                 }

@@ -2,14 +2,24 @@ package it.lgdb.biblenotes.data
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
+import it.lgdb.biblenotes.domain.BackupPayload
+import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.domain.NoteSorter
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.DraftRecord
+import it.lgdb.biblenotes.model.ImportMode
+import it.lgdb.biblenotes.model.ImportSummary
 import it.lgdb.biblenotes.model.NoteRecord
+import it.lgdb.biblenotes.model.NoteSortOption
 import it.lgdb.biblenotes.model.RichNoteContent
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import java.io.File
+import java.util.UUID
 
 sealed interface PinToggleResult {
     data class Toggled(val pinned: Boolean) : PinToggleResult
@@ -19,78 +29,55 @@ sealed interface PinToggleResult {
 
 class NotesRepository(context: Context) {
 
-    private val dbHelper = NotesDatabaseHelper(context)
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val dbHelper = NotesDatabaseHelper(appContext)
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val safetyBackupFile = File(appContext.filesDir, SAFETY_BACKUP_FILENAME)
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }
 
-    suspend fun getAllNotes(): List<NoteRecord> = withContext(Dispatchers.IO) {
-        val db = dbHelper.readableDatabase
-        val list = mutableListOf<NoteRecord>()
-        db.query(
-            NotesDatabaseHelper.TABLE_NOTES,
-            null,
-            null,
-            null,
-            null,
-            null,
-            "${NotesDatabaseHelper.COL_CREATED_AT} DESC"
-        ).use { cursor ->
-            val idIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_ID)
-            val titleIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TITLE)
-            val richIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_RICH_CONTENT_JSON)
-            val tagsIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TAGS_JSON)
-            val createdIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_CREATED_AT)
-            val updatedIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_UPDATED_AT)
-            val pinnedIdx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_PINNED)
+    suspend fun getAllNotes(sortOption: NoteSortOption = getSortOption()): List<NoteRecord> =
+        withContext(Dispatchers.IO) {
+            val db = dbHelper.writableDatabase
+            purgeExpiredTrashInternal(db, System.currentTimeMillis())
 
-            while (cursor.moveToNext()) {
-                val richJson = cursor.getString(richIdx)
-                val tagsJson = cursor.getString(tagsIdx)
-                val richContent = runCatching {
-                    json.decodeFromString<RichNoteContent>(richJson)
-                }.getOrElse { RichNoteContent() }
-                val tags = runCatching {
-                    json.decodeFromString<List<String>>(tagsJson)
-                }.getOrElse { emptyList() }
+            val list = queryNotesInternal(
+                db = db,
+                selection = "${NotesDatabaseHelper.COL_DELETED_AT} IS NULL",
+                orderBy = "${NotesDatabaseHelper.COL_UPDATED_AT} DESC"
+            )
 
-                list.add(
-                    NoteRecord(
-                        id = cursor.getString(idIdx),
-                        title = cursor.getString(titleIdx),
-                        content = richContent,
-                        tags = tags,
-                        createdAt = cursor.getLong(createdIdx),
-                        updatedAt = cursor.getLong(updatedIdx),
-                        pinned = cursor.getInt(pinnedIdx) == 1
-                    )
-                )
-            }
-        }
-
-        val sortedResult = NoteSorter.sortForHome(list)
-        if (sortedResult.unpinnedExcessIds.isNotEmpty()) {
-            val writable = dbHelper.writableDatabase
-            writable.beginTransaction()
-            try {
-                sortedResult.unpinnedExcessIds.forEach { excessId ->
-                    val cv = ContentValues().apply { put(NotesDatabaseHelper.COL_PINNED, 0) }
-                    writable.update(
-                        NotesDatabaseHelper.TABLE_NOTES,
-                        cv,
-                        "${NotesDatabaseHelper.COL_ID} = ?",
-                        arrayOf(excessId)
-                    )
+            val sortedResult = NoteSorter.sortForHome(list, sortOption)
+            if (sortedResult.unpinnedExcessIds.isNotEmpty()) {
+                db.beginTransaction()
+                try {
+                    sortedResult.unpinnedExcessIds.forEach { excessId ->
+                        val cv = ContentValues().apply { put(NotesDatabaseHelper.COL_PINNED, 0) }
+                        db.update(
+                            NotesDatabaseHelper.TABLE_NOTES,
+                            cv,
+                            "${NotesDatabaseHelper.COL_ID} = ?",
+                            arrayOf(excessId)
+                        )
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
                 }
-                writable.setTransactionSuccessful()
-            } finally {
-                writable.endTransaction()
             }
+            sortedResult.sorted
         }
 
-        sortedResult.sorted
+    suspend fun getTrashedNotes(): List<NoteRecord> = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        purgeExpiredTrashInternal(db, System.currentTimeMillis())
+        queryNotesInternal(
+            db = db,
+            selection = "${NotesDatabaseHelper.COL_DELETED_AT} IS NOT NULL",
+            orderBy = "${NotesDatabaseHelper.COL_DELETED_AT} DESC"
+        )
     }
 
     suspend fun getNoteById(id: String): NoteRecord? = withContext(Dispatchers.IO) {
@@ -105,54 +92,47 @@ class NotesRepository(context: Context) {
             null
         ).use { cursor ->
             if (!cursor.moveToFirst()) return@withContext null
-            val richJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_RICH_CONTENT_JSON))
-            val tagsJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TAGS_JSON))
-            NoteRecord(
-                id = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_ID)),
-                title = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TITLE)),
-                content = runCatching { json.decodeFromString<RichNoteContent>(richJson) }.getOrElse { RichNoteContent() },
-                tags = runCatching { json.decodeFromString<List<String>>(tagsJson) }.getOrElse { emptyList() },
-                createdAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_CREATED_AT)),
-                updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_UPDATED_AT)),
-                pinned = cursor.getInt(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_PINNED)) == 1
-            )
+            cursorToNoteRecord(cursor)
         }
     }
 
     suspend fun saveNote(note: NoteRecord) = withContext(Dispatchers.IO) {
+        require(!note.isCorrupted) { "Corrupted note cannot be overwritten" }
         val db = dbHelper.writableDatabase
         db.beginTransaction()
         try {
-            val values = ContentValues().apply {
-                put(NotesDatabaseHelper.COL_ID, note.id)
-                put(NotesDatabaseHelper.COL_TITLE, note.title)
-                put(NotesDatabaseHelper.COL_PLAIN_TEXT, note.content.text)
-                put(NotesDatabaseHelper.COL_RICH_CONTENT_JSON, json.encodeToString(RichNoteContent.serializer(), note.content))
-                put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(note.tags))
-                put(NotesDatabaseHelper.COL_CREATED_AT, note.createdAt)
-                put(NotesDatabaseHelper.COL_UPDATED_AT, note.updatedAt)
-                put(NotesDatabaseHelper.COL_PINNED, if (note.pinned) 1 else 0)
+            // Verify we are not overwriting a corrupted stored row
+            db.query(
+                NotesDatabaseHelper.TABLE_NOTES,
+                arrayOf(NotesDatabaseHelper.COL_RICH_CONTENT_JSON),
+                "${NotesDatabaseHelper.COL_ID} = ?",
+                arrayOf(note.id),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val existingJson = cursor.getString(0)
+                    val decoded = runCatching { json.decodeFromString<RichNoteContent>(existingJson) }
+                    if (decoded.isFailure) {
+                        error("Corrupted stored note cannot be overwritten")
+                    }
+                }
             }
+
+            val knownLabels = readLabelsTableInternal(db)
+            val canonicalTags = canonicalizeTags(note.tags, knownLabels)
+
+            val values = noteContentValues(note.copy(tags = canonicalTags))
             db.insertWithOnConflict(
                 NotesDatabaseHelper.TABLE_NOTES,
                 null,
                 values,
-                android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+                SQLiteDatabase.CONFLICT_REPLACE
             )
 
-            note.tags.forEach { tag ->
-                val trimmed = tag.trim()
-                if (trimmed.isNotEmpty()) {
-                    val labelValues = ContentValues().apply {
-                        put(NotesDatabaseHelper.COL_LABEL_NAME, trimmed)
-                    }
-                    db.insertWithOnConflict(
-                        NotesDatabaseHelper.TABLE_LABELS,
-                        null,
-                        labelValues,
-                        android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
-                    )
-                }
+            canonicalTags.forEach { tag ->
+                insertLabelIfAbsentCaseInsensitive(db, tag)
             }
             db.setTransactionSuccessful()
         } finally {
@@ -160,65 +140,322 @@ class NotesRepository(context: Context) {
         }
     }
 
-    suspend fun deleteNote(id: String) = withContext(Dispatchers.IO) {
+    suspend fun moveNoteToTrash(id: String) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
-        db.delete(
+        db.beginTransaction()
+        try {
+            val values = ContentValues().apply {
+                put(NotesDatabaseHelper.COL_DELETED_AT, System.currentTimeMillis())
+                put(NotesDatabaseHelper.COL_PINNED, 0)
+            }
+            db.update(
+                NotesDatabaseHelper.TABLE_NOTES,
+                values,
+                "${NotesDatabaseHelper.COL_ID} = ?",
+                arrayOf(id)
+            )
+            db.delete(
+                NotesDatabaseHelper.TABLE_DRAFTS,
+                "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                arrayOf(id)
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    suspend fun restoreNoteFromTrash(id: String) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            putNull(NotesDatabaseHelper.COL_DELETED_AT)
+        }
+        db.update(
             NotesDatabaseHelper.TABLE_NOTES,
+            values,
             "${NotesDatabaseHelper.COL_ID} = ?",
             arrayOf(id)
         )
     }
 
-    suspend fun replaceAllData(notes: List<NoteRecord>, labels: List<String>) = withContext(Dispatchers.IO) {
-        val normalized = NoteSorter.sortForHome(notes).sorted
-        val allLabels = (labels + normalized.flatMap { it.tags })
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-
+    suspend fun permanentlyDeleteNote(id: String) = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
         db.beginTransaction()
         try {
-            db.delete(NotesDatabaseHelper.TABLE_NOTES, null, null)
-            db.delete(NotesDatabaseHelper.TABLE_LABELS, null, null)
-
-            normalized.forEach { note ->
-                val values = ContentValues().apply {
-                    put(NotesDatabaseHelper.COL_ID, note.id)
-                    put(NotesDatabaseHelper.COL_TITLE, note.title)
-                    put(NotesDatabaseHelper.COL_PLAIN_TEXT, note.content.text)
-                    put(
-                        NotesDatabaseHelper.COL_RICH_CONTENT_JSON,
-                        json.encodeToString(RichNoteContent.serializer(), note.content)
-                    )
-                    put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(note.tags))
-                    put(NotesDatabaseHelper.COL_CREATED_AT, note.createdAt)
-                    put(NotesDatabaseHelper.COL_UPDATED_AT, note.updatedAt)
-                    put(NotesDatabaseHelper.COL_PINNED, if (note.pinned) 1 else 0)
-                }
-                db.insertWithOnConflict(
-                    NotesDatabaseHelper.TABLE_NOTES,
-                    null,
-                    values,
-                    android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
-                )
-            }
-
-            allLabels.forEach { label ->
-                val labelValues = ContentValues().apply {
-                    put(NotesDatabaseHelper.COL_LABEL_NAME, label)
-                }
-                db.insertWithOnConflict(
-                    NotesDatabaseHelper.TABLE_LABELS,
-                    null,
-                    labelValues,
-                    android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
-                )
-            }
-
+            db.delete(
+                NotesDatabaseHelper.TABLE_NOTES,
+                "${NotesDatabaseHelper.COL_ID} = ?",
+                arrayOf(id)
+            )
+            db.delete(
+                NotesDatabaseHelper.TABLE_DRAFTS,
+                "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+                arrayOf(id)
+            )
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
+        }
+    }
+
+    suspend fun emptyTrash() = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(
+            NotesDatabaseHelper.TABLE_NOTES,
+            "${NotesDatabaseHelper.COL_DELETED_AT} IS NOT NULL",
+            null
+        )
+    }
+
+    suspend fun getDraft(noteKey: String): DraftRecord? = withContext(Dispatchers.IO) {
+        val db = dbHelper.readableDatabase
+        db.query(
+            NotesDatabaseHelper.TABLE_DRAFTS,
+            null,
+            "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+            arrayOf(noteKey),
+            null,
+            null,
+            null
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return@withContext null
+            val title = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TITLE))
+            val richJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_RICH_CONTENT_JSON))
+            val tagsJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TAGS_JSON))
+            val updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_UPDATED_AT))
+            val richContent = runCatching {
+                json.decodeFromString<RichNoteContent>(richJson)
+            }.getOrNull() ?: return@withContext null
+            val tags = runCatching {
+                json.decodeFromString<List<String>>(tagsJson)
+            }.getOrElse { emptyList() }
+            DraftRecord(
+                noteKey = noteKey,
+                title = title,
+                content = richContent,
+                tags = tags,
+                updatedAt = updatedAt
+            )
+        }
+    }
+
+    suspend fun saveDraft(draft: DraftRecord) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(NotesDatabaseHelper.COL_DRAFT_KEY, draft.noteKey)
+            put(NotesDatabaseHelper.COL_TITLE, draft.title)
+            put(NotesDatabaseHelper.COL_RICH_CONTENT_JSON, json.encodeToString(RichNoteContent.serializer(), draft.content))
+            put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(draft.tags))
+            put(NotesDatabaseHelper.COL_UPDATED_AT, draft.updatedAt)
+        }
+        db.insertWithOnConflict(
+            NotesDatabaseHelper.TABLE_DRAFTS,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    suspend fun deleteDraft(noteKey: String) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        db.delete(
+            NotesDatabaseHelper.TABLE_DRAFTS,
+            "${NotesDatabaseHelper.COL_DRAFT_KEY} = ?",
+            arrayOf(noteKey)
+        )
+    }
+
+    suspend fun importBackup(payload: BackupPayload, mode: ImportMode): ImportSummary =
+        withContext(Dispatchers.IO) {
+            val db = dbHelper.writableDatabase
+            val activeExisting = queryNotesInternal(
+                db = db,
+                selection = "${NotesDatabaseHelper.COL_DELETED_AT} IS NULL",
+                orderBy = "${NotesDatabaseHelper.COL_UPDATED_AT} DESC"
+            )
+            val allExisting = queryNotesInternal(db = db, selection = null, orderBy = null)
+            val existingLabels = readLabelsTableInternal(db)
+
+            var safetyBackupCreated = false
+            if (mode == ImportMode.REPLACE_ALL && (activeExisting.isNotEmpty() || existingLabels.isNotEmpty())) {
+                val backupJson = BackupSerializer.encode(activeExisting, existingLabels)
+                safetyBackupFile.writeText(backupJson, Charsets.UTF_8)
+                safetyBackupCreated = true
+            }
+
+            var invalidCount = 0
+            var ignoredCount = 0
+            var importedCount = 0
+
+            val validCandidates = mutableListOf<NoteRecord>()
+            for (rawNote in payload.notes) {
+                val isEmptyNote = rawNote.title.isBlank() &&
+                    rawNote.content.text.isBlank() &&
+                    rawNote.content.bibleRefs.isEmpty() &&
+                    rawNote.tags.isEmpty()
+                if (isEmptyNote) {
+                    invalidCount++
+                } else {
+                    validCandidates.add(rawNote.copy(deletedAt = null))
+                }
+            }
+
+            db.beginTransaction()
+            try {
+                if (mode == ImportMode.REPLACE_ALL) {
+                    db.delete(NotesDatabaseHelper.TABLE_NOTES, null, null)
+                    db.delete(NotesDatabaseHelper.TABLE_LABELS, null, null)
+                    db.delete(NotesDatabaseHelper.TABLE_DRAFTS, null, null)
+
+                    val seenById = linkedMapOf<String, NoteRecord>()
+                    val canonicalLabelMap = linkedMapOf<String, String>()
+                    payload.allLabels.forEach { label ->
+                        val trimmed = label.trim()
+                        if (trimmed.isNotEmpty()) {
+                            canonicalLabelMap.putIfAbsent(trimmed.lowercase(), trimmed)
+                        }
+                    }
+
+                    val notesToInsert = mutableListOf<NoteRecord>()
+                    for (candidate in validCandidates) {
+                        val normalizedTags = candidate.tags.mapNotNull { t ->
+                            val trimmed = t.trim()
+                            if (trimmed.isEmpty()) null
+                            else canonicalLabelMap.getOrPut(trimmed.lowercase()) { trimmed }
+                        }.distinctBy { it.lowercase() }
+
+                        val existingSameId = seenById[candidate.id]
+                        if (existingSameId != null) {
+                            if (areNotesEquivalent(existingSameId, candidate.copy(tags = normalizedTags))) {
+                                ignoredCount++
+                                continue
+                            } else {
+                                val reassigned = candidate.copy(
+                                    id = "${candidate.id}-${UUID.randomUUID().toString().take(6)}",
+                                    tags = normalizedTags
+                                )
+                                seenById[reassigned.id] = reassigned
+                                notesToInsert.add(reassigned)
+                                importedCount++
+                            }
+                        } else {
+                            val clean = candidate.copy(tags = normalizedTags)
+                            seenById[clean.id] = clean
+                            notesToInsert.add(clean)
+                            importedCount++
+                        }
+                    }
+
+                    val normalized = NoteSorter.sortForHome(notesToInsert, getSortOption()).sorted
+                    normalized.forEach { note ->
+                        db.insertWithOnConflict(
+                            NotesDatabaseHelper.TABLE_NOTES,
+                            null,
+                            noteContentValues(note),
+                            SQLiteDatabase.CONFLICT_REPLACE
+                        )
+                    }
+                    canonicalLabelMap.values.forEach { label ->
+                        insertLabelExact(db, label)
+                    }
+                    db.setTransactionSuccessful()
+                    ImportSummary(
+                        mode = mode,
+                        importedCount = importedCount,
+                        ignoredCount = ignoredCount,
+                        invalidCount = invalidCount,
+                        labelsCount = canonicalLabelMap.size,
+                        safetyBackupCreated = safetyBackupCreated
+                    )
+                } else {
+                    // MERGE mode
+                    val existingById = allExisting.associateBy { it.id }.toMutableMap()
+                    val canonicalLabelMap = linkedMapOf<String, String>()
+                    (existingLabels + activeExisting.flatMap { it.tags } + payload.allLabels).forEach { label ->
+                        val trimmed = label.trim()
+                        if (trimmed.isNotEmpty()) {
+                            canonicalLabelMap.putIfAbsent(trimmed.lowercase(), trimmed)
+                        }
+                    }
+
+                    val newNotesToInsert = mutableListOf<NoteRecord>()
+                    for (candidate in validCandidates) {
+                        val normalizedTags = candidate.tags.mapNotNull { t ->
+                            val trimmed = t.trim()
+                            if (trimmed.isEmpty()) null
+                            else canonicalLabelMap.getOrPut(trimmed.lowercase()) { trimmed }
+                        }.distinctBy { it.lowercase() }
+                        val normalizedCandidate = candidate.copy(tags = normalizedTags)
+
+                        val existing = existingById[normalizedCandidate.id]
+                        if (existing != null) {
+                            if (existing.deletedAt == null && areNotesEquivalent(existing, normalizedCandidate)) {
+                                ignoredCount++
+                            } else {
+                                val newId = "${normalizedCandidate.id}-imp-${UUID.randomUUID().toString().take(6)}"
+                                val copied = normalizedCandidate.copy(id = newId)
+                                existingById[newId] = copied
+                                newNotesToInsert.add(copied)
+                                importedCount++
+                            }
+                        } else {
+                            existingById[normalizedCandidate.id] = normalizedCandidate
+                            newNotesToInsert.add(normalizedCandidate)
+                            importedCount++
+                        }
+                    }
+
+                    // Enforce MAX_PINNED_NOTES across merged active notes
+                    val combinedActive = activeExisting + newNotesToInsert
+                    val sortedCombined = NoteSorter.sortForHome(combinedActive, getSortOption())
+                    val excessSet = sortedCombined.unpinnedExcessIds.toSet()
+
+                    newNotesToInsert.forEach { note ->
+                        val finalNote = if (note.id in excessSet) note.copy(pinned = false) else note
+                        db.insertWithOnConflict(
+                            NotesDatabaseHelper.TABLE_NOTES,
+                            null,
+                            noteContentValues(finalNote),
+                            SQLiteDatabase.CONFLICT_REPLACE
+                        )
+                    }
+                    excessSet.forEach { excessId ->
+                        if (activeExisting.any { it.id == excessId }) {
+                            val cv = ContentValues().apply { put(NotesDatabaseHelper.COL_PINNED, 0) }
+                            db.update(
+                                NotesDatabaseHelper.TABLE_NOTES,
+                                cv,
+                                "${NotesDatabaseHelper.COL_ID} = ?",
+                                arrayOf(excessId)
+                            )
+                        }
+                    }
+
+                    canonicalLabelMap.values.forEach { label ->
+                        insertLabelIfAbsentCaseInsensitive(db, label)
+                    }
+
+                    db.setTransactionSuccessful()
+                    ImportSummary(
+                        mode = mode,
+                        importedCount = importedCount,
+                        ignoredCount = ignoredCount,
+                        invalidCount = invalidCount,
+                        labelsCount = canonicalLabelMap.size,
+                        safetyBackupCreated = false
+                    )
+                }
+            } finally {
+                db.endTransaction()
+            }
+        }
+
+    fun hasSafetyBackup(): Boolean = safetyBackupFile.exists() && safetyBackupFile.length() > 0L
+
+    suspend fun readSafetyBackup(): Result<BackupPayload> = withContext(Dispatchers.IO) {
+        runCatching {
+            check(hasSafetyBackup()) { "No safety backup available" }
+            BackupSerializer.decode(safetyBackupFile.readText(Charsets.UTF_8)).getOrThrow()
         }
     }
 
@@ -253,48 +490,34 @@ class NotesRepository(context: Context) {
     }
 
     suspend fun getAllTags(): List<String> = withContext(Dispatchers.IO) {
-        val set = sortedSetOf(String.CASE_INSENSITIVE_ORDER)
         val db = dbHelper.readableDatabase
-        db.query(
-            NotesDatabaseHelper.TABLE_LABELS,
-            arrayOf(NotesDatabaseHelper.COL_LABEL_NAME),
-            null,
-            null,
-            null,
-            null,
-            null
-        ).use { cursor ->
-            val idx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_LABEL_NAME)
-            while (cursor.moveToNext()) {
-                val name = cursor.getString(idx).trim()
-                if (name.isNotEmpty()) set.add(name)
+        val canonicalMap = linkedMapOf<String, String>()
+        readLabelsTableInternal(db).forEach { name ->
+            canonicalMap.putIfAbsent(name.lowercase(), name)
+        }
+        queryNotesInternal(
+            db = db,
+            selection = "${NotesDatabaseHelper.COL_DELETED_AT} IS NULL",
+            orderBy = null
+        ).forEach { note ->
+            note.tags.forEach { tag ->
+                val trimmed = tag.trim()
+                if (trimmed.isNotEmpty()) {
+                    canonicalMap.putIfAbsent(trimmed.lowercase(), trimmed)
+                }
             }
         }
-        getAllNotes().forEach { note ->
-            note.tags.forEach { t ->
-                val trimmed = t.trim()
-                if (trimmed.isNotEmpty()) set.add(trimmed)
-            }
-        }
-        set.toList()
+        canonicalMap.values.sortedWith(String.CASE_INSENSITIVE_ORDER)
     }
 
     suspend fun createLabel(name: String): Boolean = withContext(Dispatchers.IO) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return@withContext false
         val existing = getAllTags()
-        if (existing.any { it.equals(trimmed, ignoreCase = false) }) return@withContext false
+        if (existing.any { it.equals(trimmed, ignoreCase = true) }) return@withContext false
 
         val db = dbHelper.writableDatabase
-        val values = ContentValues().apply {
-            put(NotesDatabaseHelper.COL_LABEL_NAME, trimmed)
-        }
-        db.insertWithOnConflict(
-            NotesDatabaseHelper.TABLE_LABELS,
-            null,
-            values,
-            android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
-        )
+        insertLabelExact(db, trimmed)
         true
     }
 
@@ -302,30 +525,31 @@ class NotesRepository(context: Context) {
         val trimmedNew = newName.trim()
         if (trimmedNew.isEmpty() || trimmedNew == oldName) return@withContext false
 
-        val notes = getAllNotes()
+        val existing = getAllTags()
+        val collidesWithOther = existing.any {
+            it.equals(trimmedNew, ignoreCase = true) && !it.equals(oldName, ignoreCase = true)
+        }
+        if (collidesWithOther) return@withContext false
+
         val db = dbHelper.writableDatabase
+        val allNotes = queryNotesInternal(db = db, selection = null, orderBy = null)
         db.beginTransaction()
         try {
-            db.delete(
-                NotesDatabaseHelper.TABLE_LABELS,
-                "${NotesDatabaseHelper.COL_LABEL_NAME} = ?",
-                arrayOf(oldName)
-            )
-            val cv = ContentValues().apply {
-                put(NotesDatabaseHelper.COL_LABEL_NAME, trimmedNew)
+            val storedLabels = readLabelsTableInternal(db)
+            storedLabels.filter { it.equals(oldName, ignoreCase = true) }.forEach { match ->
+                db.delete(
+                    NotesDatabaseHelper.TABLE_LABELS,
+                    "${NotesDatabaseHelper.COL_LABEL_NAME} = ?",
+                    arrayOf(match)
+                )
             }
-            db.insertWithOnConflict(
-                NotesDatabaseHelper.TABLE_LABELS,
-                null,
-                cv,
-                android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
-            )
+            insertLabelExact(db, trimmedNew)
 
-            notes.forEach { note ->
-                if (note.tags.contains(oldName)) {
+            allNotes.forEach { note ->
+                if (note.tags.any { it.equals(oldName, ignoreCase = true) }) {
                     val updatedTags = note.tags
-                        .map { if (it == oldName) trimmedNew else it }
-                        .distinct()
+                        .map { if (it.equals(oldName, ignoreCase = true)) trimmedNew else it }
+                        .distinctBy { it.lowercase() }
                     val noteCv = ContentValues().apply {
                         put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(updatedTags))
                     }
@@ -345,19 +569,22 @@ class NotesRepository(context: Context) {
     }
 
     suspend fun deleteLabel(name: String) = withContext(Dispatchers.IO) {
-        val notes = getAllNotes()
         val db = dbHelper.writableDatabase
+        val allNotes = queryNotesInternal(db = db, selection = null, orderBy = null)
         db.beginTransaction()
         try {
-            db.delete(
-                NotesDatabaseHelper.TABLE_LABELS,
-                "${NotesDatabaseHelper.COL_LABEL_NAME} = ?",
-                arrayOf(name)
-            )
+            val storedLabels = readLabelsTableInternal(db)
+            storedLabels.filter { it.equals(name, ignoreCase = true) }.forEach { match ->
+                db.delete(
+                    NotesDatabaseHelper.TABLE_LABELS,
+                    "${NotesDatabaseHelper.COL_LABEL_NAME} = ?",
+                    arrayOf(match)
+                )
+            }
 
-            notes.forEach { note ->
-                if (note.tags.contains(name)) {
-                    val updatedTags = note.tags.filterNot { it == name }
+            allNotes.forEach { note ->
+                if (note.tags.any { it.equals(name, ignoreCase = true) }) {
+                    val updatedTags = note.tags.filterNot { it.equals(name, ignoreCase = true) }
                     val noteCv = ContentValues().apply {
                         put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(updatedTags))
                     }
@@ -400,10 +627,165 @@ class NotesRepository(context: Context) {
         prefs.edit().putString(KEY_LANGUAGE, language.name).apply()
     }
 
+    fun getSortOption(): NoteSortOption {
+        val raw = prefs.getString(KEY_SORT_OPTION, NoteSortOption.UPDATED_DESC.name)
+            ?: NoteSortOption.UPDATED_DESC.name
+        return runCatching { NoteSortOption.valueOf(raw) }.getOrDefault(NoteSortOption.UPDATED_DESC)
+    }
+
+    fun setSortOption(option: NoteSortOption) {
+        prefs.edit().putString(KEY_SORT_OPTION, option.name).apply()
+    }
+
+    private fun purgeExpiredTrashInternal(db: SQLiteDatabase, now: Long) {
+        val cutoff = now - TRASH_RETENTION_MS
+        db.delete(
+            NotesDatabaseHelper.TABLE_NOTES,
+            "${NotesDatabaseHelper.COL_DELETED_AT} IS NOT NULL AND ${NotesDatabaseHelper.COL_DELETED_AT} < ?",
+            arrayOf(cutoff.toString())
+        )
+    }
+
+    private fun queryNotesInternal(
+        db: SQLiteDatabase,
+        selection: String?,
+        orderBy: String?
+    ): List<NoteRecord> {
+        val list = mutableListOf<NoteRecord>()
+        db.query(
+            NotesDatabaseHelper.TABLE_NOTES,
+            null,
+            selection,
+            null,
+            null,
+            null,
+            orderBy
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                list.add(cursorToNoteRecord(cursor))
+            }
+        }
+        return list
+    }
+
+    private fun cursorToNoteRecord(cursor: Cursor): NoteRecord {
+        val richJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_RICH_CONTENT_JSON))
+        val tagsJson = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TAGS_JSON))
+        val richResult = runCatching { json.decodeFromString<RichNoteContent>(richJson) }
+        val isCorrupted = richResult.isFailure
+        val richContent = richResult.getOrElse { RichNoteContent() }
+        val tags = runCatching {
+            json.decodeFromString<List<String>>(tagsJson)
+        }.getOrElse { emptyList() }
+        val deletedAtIdx = cursor.getColumnIndex(NotesDatabaseHelper.COL_DELETED_AT)
+        val deletedAt = if (deletedAtIdx >= 0 && !cursor.isNull(deletedAtIdx)) {
+            cursor.getLong(deletedAtIdx)
+        } else {
+            null
+        }
+
+        return NoteRecord(
+            id = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_ID)),
+            title = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_TITLE)),
+            content = richContent,
+            tags = tags,
+            createdAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_CREATED_AT)),
+            updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_UPDATED_AT)),
+            pinned = cursor.getInt(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_PINNED)) == 1,
+            deletedAt = deletedAt,
+            isCorrupted = isCorrupted,
+            rawCorruptedJson = if (isCorrupted) richJson else null
+        )
+    }
+
+    private fun noteContentValues(note: NoteRecord): ContentValues = ContentValues().apply {
+        put(NotesDatabaseHelper.COL_ID, note.id)
+        put(NotesDatabaseHelper.COL_TITLE, note.title)
+        put(NotesDatabaseHelper.COL_PLAIN_TEXT, note.content.text)
+        put(
+            NotesDatabaseHelper.COL_RICH_CONTENT_JSON,
+            json.encodeToString(RichNoteContent.serializer(), note.content)
+        )
+        put(NotesDatabaseHelper.COL_TAGS_JSON, json.encodeToString(note.tags))
+        put(NotesDatabaseHelper.COL_CREATED_AT, note.createdAt)
+        put(NotesDatabaseHelper.COL_UPDATED_AT, note.updatedAt)
+        put(NotesDatabaseHelper.COL_PINNED, if (note.pinned) 1 else 0)
+        if (note.deletedAt != null) {
+            put(NotesDatabaseHelper.COL_DELETED_AT, note.deletedAt)
+        } else {
+            putNull(NotesDatabaseHelper.COL_DELETED_AT)
+        }
+    }
+
+    private fun readLabelsTableInternal(db: SQLiteDatabase): List<String> {
+        val result = mutableListOf<String>()
+        db.query(
+            NotesDatabaseHelper.TABLE_LABELS,
+            arrayOf(NotesDatabaseHelper.COL_LABEL_NAME),
+            null,
+            null,
+            null,
+            null,
+            null
+        ).use { cursor ->
+            val idx = cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_LABEL_NAME)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(idx).trim()
+                if (name.isNotEmpty()) result.add(name)
+            }
+        }
+        return result
+    }
+
+    private fun canonicalizeTags(tags: List<String>, knownLabels: List<String>): List<String> {
+        val map = linkedMapOf<String, String>()
+        knownLabels.forEach { label ->
+            val trimmed = label.trim()
+            if (trimmed.isNotEmpty()) map.putIfAbsent(trimmed.lowercase(), trimmed)
+        }
+        return tags.mapNotNull { tag ->
+            val trimmed = tag.trim()
+            if (trimmed.isEmpty()) null
+            else map.getOrPut(trimmed.lowercase()) { trimmed }
+        }.distinctBy { it.lowercase() }
+    }
+
+    private fun insertLabelIfAbsentCaseInsensitive(db: SQLiteDatabase, label: String) {
+        val existing = readLabelsTableInternal(db)
+        if (existing.none { it.equals(label, ignoreCase = true) }) {
+            insertLabelExact(db, label)
+        }
+    }
+
+    private fun insertLabelExact(db: SQLiteDatabase, label: String) {
+        val labelValues = ContentValues().apply {
+            put(NotesDatabaseHelper.COL_LABEL_NAME, label)
+        }
+        db.insertWithOnConflict(
+            NotesDatabaseHelper.TABLE_LABELS,
+            null,
+            labelValues,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+    }
+
+    private fun areNotesEquivalent(a: NoteRecord, b: NoteRecord): Boolean {
+        return a.title.trim() == b.title.trim() &&
+            a.content == b.content &&
+            a.pinned == b.pinned &&
+            a.tags.map { it.lowercase() } == b.tags.map { it.lowercase() }
+    }
+
     companion object {
+        const val NEW_NOTE_DRAFT_KEY = "__new_note_draft__"
+        const val TRASH_RETENTION_DAYS = 30L
+        const val TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24L * 60L * 60L * 1000L
+
+        private const val SAFETY_BACKUP_FILENAME = "pre_import_safety_backup.json"
         private const val PREFS_NAME = "bible_notes_prefs"
         private const val KEY_OPEN_JW_LIBRARY = "open_with_jw_library"
         private const val KEY_THEME = "theme_option"
         private const val KEY_LANGUAGE = "app_language"
+        private const val KEY_SORT_OPTION = "sort_option"
     }
 }

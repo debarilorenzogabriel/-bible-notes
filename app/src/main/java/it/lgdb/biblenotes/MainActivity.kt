@@ -5,6 +5,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -39,7 +47,14 @@ import it.lgdb.biblenotes.ui.labels.LabelsScreen
 import it.lgdb.biblenotes.ui.settings.SettingsScreen
 import it.lgdb.biblenotes.ui.theme.BibleNotesTheme
 import it.lgdb.biblenotes.ui.theme.LocalBibleNotesExtraColors
+import it.lgdb.biblenotes.ui.trash.TrashScreen
 import kotlinx.coroutines.flow.collectLatest
+
+private sealed interface RootScreen {
+    data object Main : RootScreen
+    data object Trash : RootScreen
+    data class Editor(val noteId: String?) : RootScreen
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -86,127 +101,194 @@ class MainActivity : ComponentActivity() {
                 editorViewModel.saveAndClose(silentIfEmpty = true)
             }
 
-            BackHandler(enabled = !appState.isEditorOpen && appState.currentTab != MainTab.HOME) {
+            BackHandler(enabled = !appState.isEditorOpen && appState.isTrashOpen) {
+                appViewModel.closeTrash()
+            }
+
+            BackHandler(enabled = !appState.isEditorOpen && !appState.isTrashOpen && appState.currentTab != MainTab.HOME) {
                 appViewModel.selectTab(MainTab.HOME)
             }
 
             BibleNotesTheme(themeOption = appState.themeOption) {
-                if (appState.isEditorOpen) {
-                    NoteEditorScreen(
-                        state = editorState,
-                        viewModel = editorViewModel,
-                        onCloseEditor = { appViewModel.closeEditor() }
-                    )
-                } else {
-                    val extraColors = LocalBibleNotesExtraColors.current
-                    Scaffold(
-                        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-                        containerColor = MaterialTheme.colorScheme.background,
-                        bottomBar = {
-                            NavigationBar(
-                                containerColor = extraColors.footerBg
-                            ) {
-                                NavigationBarItem(
-                                    selected = appState.currentTab == MainTab.HOME,
-                                    onClick = { appViewModel.selectTab(MainTab.HOME) },
-                                    icon = {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.Notes,
-                                            contentDescription = strings.navNotes
-                                        )
-                                    },
-                                    label = { Text(strings.navNotes) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        indicatorColor = extraColors.footerActiveBg
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = appState.currentTab == MainTab.LABELS,
-                                    onClick = { appViewModel.selectTab(MainTab.LABELS) },
-                                    icon = {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.Label,
-                                            contentDescription = strings.navLabels
-                                        )
-                                    },
-                                    label = { Text(strings.navLabels) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        indicatorColor = extraColors.footerActiveBg
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = appState.currentTab == MainTab.SETTINGS,
-                                    onClick = { appViewModel.selectTab(MainTab.SETTINGS) },
-                                    icon = {
-                                        Icon(
-                                            imageVector = Icons.Filled.Settings,
-                                            contentDescription = strings.navSettings
-                                        )
-                                    },
-                                    label = { Text(strings.navSettings) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        indicatorColor = extraColors.footerActiveBg
-                                    )
+                val rootScreen = when {
+                    appState.isEditorOpen -> RootScreen.Editor(appState.editorTargetNoteId)
+                    appState.isTrashOpen -> RootScreen.Trash
+                    else -> RootScreen.Main
+                }
+
+                @OptIn(ExperimentalSharedTransitionApi::class)
+                SharedTransitionLayout {
+                    val sharedTransitionScope = this
+                    AnimatedContent(
+                        targetState = rootScreen,
+                        contentKey = { screen ->
+                            when (screen) {
+                                RootScreen.Main -> "main"
+                                RootScreen.Trash -> "trash"
+                                is RootScreen.Editor -> "editor_${screen.noteId ?: "new"}"
+                            }
+                        },
+                        transitionSpec = {
+                            fadeIn(animationSpec = tween(durationMillis = 260)) togetherWith
+                                fadeOut(animationSpec = tween(durationMillis = 200))
+                        },
+                        label = "root_screen_transition"
+                    ) { screen ->
+                        val animatedVisibilityScope = this
+                        when (screen) {
+                            is RootScreen.Editor -> {
+                                NoteEditorScreen(
+                                    state = editorState,
+                                    viewModel = editorViewModel,
+                                    onCloseEditor = { appViewModel.closeEditor() },
+                                    sharedNoteId = screen.noteId,
+                                    sharedTransitionScope = sharedTransitionScope,
+                                    animatedVisibilityScope = animatedVisibilityScope
                                 )
                             }
-                        }
-                    ) { innerPadding ->
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(innerPadding)
-                        ) {
-                            when (appState.currentTab) {
-                                MainTab.HOME -> {
-                                    HomeScreen(
-                                        notes = appState.filteredNotes,
-                                        searchQuery = appState.homeSearchQuery,
-                                        strings = strings,
-                                        onSearchQueryChange = appViewModel::onHomeSearchQueryChanged,
-                                        onNewNoteClick = appViewModel::openNewNoteEditor,
-                                        onNoteClick = appViewModel::openNoteEditor,
-                                        onTogglePin = appViewModel::togglePinNote,
-                                        onDeleteNote = appViewModel::deleteNote,
-                                        onNoteCopied = {
-                                            appViewModel.notifyMessage(strings.copiedToClipboard)
+
+                            RootScreen.Trash -> {
+                                TrashScreen(
+                                    trashedNotes = appState.trashedNotes,
+                                    strings = strings,
+                                    onBack = appViewModel::closeTrash,
+                                    onRestoreNote = appViewModel::restoreTrashedNote,
+                                    onDeleteForever = appViewModel::permanentlyDeleteNote,
+                                    onEmptyTrash = appViewModel::emptyTrash
+                                )
+                            }
+
+                            RootScreen.Main -> {
+                                val extraColors = LocalBibleNotesExtraColors.current
+                                Scaffold(
+                                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+                                    containerColor = MaterialTheme.colorScheme.background,
+                                    bottomBar = {
+                                        NavigationBar(
+                                            containerColor = extraColors.footerBg
+                                        ) {
+                                            NavigationBarItem(
+                                                selected = appState.currentTab == MainTab.HOME,
+                                                onClick = { appViewModel.selectTab(MainTab.HOME) },
+                                                icon = {
+                                                    Icon(
+                                                        imageVector = Icons.AutoMirrored.Filled.Notes,
+                                                        contentDescription = strings.navNotes
+                                                    )
+                                                },
+                                                label = { Text(strings.navNotes) },
+                                                colors = NavigationBarItemDefaults.colors(
+                                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                                    indicatorColor = extraColors.footerActiveBg
+                                                )
+                                            )
+                                            NavigationBarItem(
+                                                selected = appState.currentTab == MainTab.LABELS,
+                                                onClick = { appViewModel.selectTab(MainTab.LABELS) },
+                                                icon = {
+                                                    Icon(
+                                                        imageVector = Icons.AutoMirrored.Filled.Label,
+                                                        contentDescription = strings.navLabels
+                                                    )
+                                                },
+                                                label = { Text(strings.navLabels) },
+                                                colors = NavigationBarItemDefaults.colors(
+                                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                                    indicatorColor = extraColors.footerActiveBg
+                                                )
+                                            )
+                                            NavigationBarItem(
+                                                selected = appState.currentTab == MainTab.SETTINGS,
+                                                onClick = { appViewModel.selectTab(MainTab.SETTINGS) },
+                                                icon = {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.Settings,
+                                                        contentDescription = strings.navSettings
+                                                    )
+                                                },
+                                                label = { Text(strings.navSettings) },
+                                                colors = NavigationBarItemDefaults.colors(
+                                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                                    indicatorColor = extraColors.footerActiveBg
+                                                )
+                                            )
                                         }
-                                    )
-                                }
+                                    }
+                                ) { innerPadding ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(innerPadding)
+                                    ) {
+                                        Crossfade(
+                                            targetState = appState.currentTab,
+                                            animationSpec = tween(durationMillis = 150),
+                                            label = "main_tab_crossfade"
+                                        ) { tab ->
+                                            when (tab) {
+                                                MainTab.HOME -> {
+                                                    HomeScreen(
+                                                        notes = appState.filteredNotes,
+                                                        searchQuery = appState.homeSearchQuery,
+                                                        selectedLabelFilter = appState.selectedLabelFilter,
+                                                        sortOption = appState.sortOption,
+                                                        trashedCount = appState.trashedNotes.size,
+                                                        strings = strings,
+                                                        onSearchQueryChange = appViewModel::onHomeSearchQueryChanged,
+                                                        onClearLabelFilter = appViewModel::clearLabelFilter,
+                                                        onSelectSortOption = appViewModel::setSortOption,
+                                                        onOpenTrash = appViewModel::openTrash,
+                                                        onNewNoteClick = appViewModel::openNewNoteEditor,
+                                                        onNoteClick = appViewModel::openNoteEditor,
+                                                        onTogglePin = appViewModel::togglePinNote,
+                                                        onDeleteNote = appViewModel::deleteNote,
+                                                        onNoteCopied = {
+                                                            appViewModel.notifyMessage(strings.copiedToClipboard)
+                                                        },
+                                                        sharedTransitionScope = sharedTransitionScope,
+                                                        animatedVisibilityScope = animatedVisibilityScope
+                                                    )
+                                                }
 
-                                MainTab.LABELS -> {
-                                    LabelsScreen(
-                                        labels = appState.filteredLabels,
-                                        searchQuery = appState.labelSearchQuery,
-                                        strings = strings,
-                                        onSearchQueryChange = appViewModel::onLabelSearchQueryChanged,
-                                        onCreateLabel = appViewModel::createLabel,
-                                        onSearchByLabel = appViewModel::filterNotesByLabel,
-                                        onRenameLabel = appViewModel::renameLabel,
-                                        onDeleteLabel = appViewModel::deleteLabel
-                                    )
-                                }
+                                                MainTab.LABELS -> {
+                                                    LabelsScreen(
+                                                        labels = appState.filteredLabels,
+                                                        searchQuery = appState.labelSearchQuery,
+                                                        strings = strings,
+                                                        onSearchQueryChange = appViewModel::onLabelSearchQueryChanged,
+                                                        onCreateLabel = appViewModel::createLabel,
+                                                        onSearchByLabel = appViewModel::filterNotesByLabel,
+                                                        onRenameLabel = appViewModel::renameLabel,
+                                                        onDeleteLabel = appViewModel::deleteLabel
+                                                    )
+                                                }
 
-                                MainTab.SETTINGS -> {
-                                    SettingsScreen(
-                                        openWithJwLibrary = appState.openWithJwLibrary,
-                                        themeOption = appState.themeOption,
-                                        language = appState.language,
-                                        strings = strings,
-                                        onToggleJwLibrary = appViewModel::setOpenWithJwLibrary,
-                                        onSelectTheme = appViewModel::setTheme,
-                                        onSelectLanguage = appViewModel::setLanguage,
-                                        onPrepareBackupJson = appViewModel::prepareBackupJson,
-                                        onConsumePendingExportJson = appViewModel::consumePendingExportJson,
-                                        onClearPendingExportJson = appViewModel::clearPendingExportJson,
-                                        onImportBackup = appViewModel::importBackup,
-                                        onNotifyMessage = appViewModel::notifyMessage
-                                    )
+                                                MainTab.SETTINGS -> {
+                                                    SettingsScreen(
+                                                        openWithJwLibrary = appState.openWithJwLibrary,
+                                                        themeOption = appState.themeOption,
+                                                        language = appState.language,
+                                                        hasSafetyBackup = appState.hasSafetyBackup,
+                                                        importSummary = appState.lastImportSummary,
+                                                        strings = strings,
+                                                        onToggleJwLibrary = appViewModel::setOpenWithJwLibrary,
+                                                        onSelectTheme = appViewModel::setTheme,
+                                                        onSelectLanguage = appViewModel::setLanguage,
+                                                        onPrepareBackupJson = appViewModel::prepareBackupJson,
+                                                        onConsumePendingExportJson = appViewModel::consumePendingExportJson,
+                                                        onClearPendingExportJson = appViewModel::clearPendingExportJson,
+                                                        onImportBackup = appViewModel::importBackup,
+                                                        onDismissImportSummary = appViewModel::dismissImportSummary,
+                                                        onRestoreSafetyBackup = appViewModel::restoreSafetyBackup,
+                                                        onNotifyMessage = appViewModel::notifyMessage
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

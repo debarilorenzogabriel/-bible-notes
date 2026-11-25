@@ -1,5 +1,17 @@
 package it.lgdb.biblenotes.ui.editor
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,15 +21,24 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,20 +48,28 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BorderColor
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatClear
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,16 +88,22 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.OffsetMapping
@@ -88,15 +123,22 @@ import it.lgdb.biblenotes.model.RichNoteContent
 import it.lgdb.biblenotes.ui.components.BibleRefInlineText
 import it.lgdb.biblenotes.ui.theme.LocalBibleNotesExtraColors
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun NoteEditorScreen(
     state: NoteEditorUiState,
     viewModel: NoteEditorViewModel,
-    onCloseEditor: () -> Unit
+    onCloseEditor: () -> Unit,
+    sharedNoteId: String? = state.activeNoteId,
+    sharedTransitionScope: SharedTransitionScope? = null,
+    animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
     val context = LocalContext.current
+    @Suppress("DEPRECATION")
+    val clipboardManager = LocalClipboardManager.current
+    val coroutineScope = rememberCoroutineScope()
     val strings = remember(state.language) { appStrings(state.language) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -104,6 +146,7 @@ fun NoteEditorScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var showTagInput by remember { mutableStateOf(false) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
     var tagDraft by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
@@ -125,7 +168,20 @@ fun NoteEditorScreen(
         viewModel.onBibleReferenceOpenResult(res)
     }
 
+    val sharedModifier = if (sharedNoteId != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) {
+            Modifier.sharedBounds(
+                sharedContentState = rememberSharedContentState(key = "note_card_$sharedNoteId"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                boundsTransform = { _, _ -> tween(durationMillis = 300, easing = FastOutSlowInEasing) }
+            )
+        }
+    } else {
+        Modifier
+    }
+
     Scaffold(
+        modifier = sharedModifier,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -135,7 +191,10 @@ fun NoteEditorScreen(
                     titleContentColor = MaterialTheme.colorScheme.onBackground
                 ),
                 navigationIcon = {
-                    IconButton(onClick = { viewModel.saveAndClose(silentIfEmpty = true) }) {
+                    IconButton(
+                        onClick = { viewModel.saveAndClose(silentIfEmpty = true) },
+                        modifier = Modifier.testTag("editor_back_button")
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = strings.backAction,
@@ -144,35 +203,143 @@ fun NoteEditorScreen(
                     }
                 },
                 title = {
-                    Text(
-                        text = if (state.activeNoteId == null) strings.newNoteTitle else strings.editNoteTitle,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column {
+                        Text(
+                            text = when {
+                                state.activeNoteId == null -> strings.newNoteTitle
+                                state.isReadOnlyMode -> strings.readNoteTitle
+                                else -> strings.editNoteTitle
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!state.isCorrupted && state.draftStatus != DraftStatus.IDLE) {
+                            Text(
+                                text = when (state.draftStatus) {
+                                    DraftStatus.SAVING -> strings.draftSaving
+                                    DraftStatus.SAVED -> strings.draftSaved
+                                    DraftStatus.IDLE -> ""
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.toggleReadOnlyMode() }) {
-                        Icon(
-                            imageVector = if (state.isReadOnlyMode) Icons.Filled.Edit else Icons.Filled.Visibility,
-                            contentDescription = if (state.isReadOnlyMode) strings.editMode else strings.readMode
-                        )
+                    if (!state.isCorrupted) {
+                        if (state.isReadOnlyMode) {
+                            FilledTonalButton(
+                                onClick = { viewModel.enterEditMode() },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .testTag("enter_edit_mode_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Edit,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(strings.editMode)
+                            }
+                        } else {
+                            IconButton(
+                                onClick = { viewModel.toggleReadOnlyMode() },
+                                modifier = Modifier.testTag("toggle_read_mode_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Visibility,
+                                    contentDescription = strings.readMode
+                                )
+                            }
+                            TextButton(
+                                onClick = { viewModel.saveAndClose(silentIfEmpty = false) },
+                                modifier = Modifier.testTag("save_note_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(strings.save, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+
+                    Box {
+                        IconButton(
+                            onClick = { showOverflowMenu = true },
+                            modifier = Modifier.testTag("editor_overflow_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.MoreVert,
+                                contentDescription = strings.moreOptionsDesc
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showOverflowMenu,
+                            onDismissRequest = { showOverflowMenu = false }
+                        ) {
+                            if (!state.isCorrupted && (!state.isReadOnlyMode || state.hasUnsavedChanges)) {
+                                DropdownMenuItem(
+                                    text = { Text(strings.cancel) },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Close, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        if (state.hasUnsavedChanges) {
+                                            showDiscardConfirm = true
+                                        } else {
+                                            viewModel.discardAndClose()
+                                        }
+                                    }
+                                )
+                            }
+                            if (state.activeNoteId != null) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = strings.delete,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Filled.DeleteOutline,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showDeleteConfirm = true
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             )
         },
         bottomBar = {
-            EditorBottomSection(
-                state = state,
-                strings = strings,
-                onApplyHighlight = viewModel::applyHighlight,
-                onAddBibleRef = { showBookWizard = true },
-                onAddTagClick = { showTagInput = !showTagInput },
-                onDeleteClick = { showDeleteConfirm = true },
-                onCancelClick = { showDiscardConfirm = true },
-                onSaveClick = { viewModel.saveAndClose(silentIfEmpty = false) }
-            )
+            if (!state.isReadOnlyMode && !state.isCorrupted) {
+                CompactEditorToolbar(
+                    canUndo = state.canUndo,
+                    canRedo = state.canRedo,
+                    strings = strings,
+                    onUndo = viewModel::undo,
+                    onRedo = viewModel::redo,
+                    onApplyHighlight = viewModel::applyHighlight,
+                    onAddBibleRef = { showBookWizard = true },
+                    onAddTagClick = { showTagInput = !showTagInput }
+                )
+            }
         }
     ) { innerPadding ->
         Column(
@@ -180,42 +347,56 @@ fun NoteEditorScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState())
         ) {
-            BasicTextField(
-                value = state.title,
-                onValueChange = viewModel::onTitleChanged,
-                enabled = !state.isReadOnlyMode,
-                singleLine = true,
-                textStyle = TextStyle(
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                decorationBox = { innerTextField ->
-                    Column {
-                        Box(modifier = Modifier.padding(vertical = 6.dp)) {
-                            if (state.title.isEmpty()) {
-                                Text(
-                                    text = strings.titlePlaceholder,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                            innerTextField()
+            if (state.isCorrupted) {
+                CorruptedNoteRecoveryBanner(
+                    rawContent = state.rawCorruptedJson.orEmpty(),
+                    strings = strings,
+                    onCopyRaw = {
+                        clipboardManager.setText(AnnotatedString(state.rawCorruptedJson.orEmpty()))
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar(strings.copiedToClipboard)
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+            }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            if (!state.isReadOnlyMode || state.title.isNotBlank()) {
+                BasicTextField(
+                    value = state.title,
+                    onValueChange = viewModel::onTitleChanged,
+                    enabled = !state.isReadOnlyMode && !state.isCorrupted,
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    decorationBox = { innerTextField ->
+                        Column {
+                            Box(modifier = Modifier.padding(vertical = 6.dp)) {
+                                if (state.title.isEmpty() && !state.isReadOnlyMode) {
+                                    Text(
+                                        text = strings.titlePlaceholder,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                innerTextField()
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
 
             val refAtCursor = state.activeRefAtCursor
-            if (!state.isReadOnlyMode && refAtCursor != null) {
+            if (!state.isReadOnlyMode && !state.isCorrupted && refAtCursor != null) {
                 AssistChip(
                     onClick = { openReference(refAtCursor) },
                     leadingIcon = {
@@ -230,7 +411,7 @@ fun NoteEditorScreen(
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
-            if (state.isReadOnlyMode) {
+            if (state.isReadOnlyMode && !state.isCorrupted) {
                 Text(
                     text = strings.tapToOpenHint,
                     style = MaterialTheme.typography.labelSmall,
@@ -239,87 +420,86 @@ fun NoteEditorScreen(
                 )
             }
 
+            // Main body area occupies all remaining vertical space
             RichNoteBodyArea(
                 content = state.richContent,
                 textFieldValue = state.textFieldValue,
-                isReadOnly = state.isReadOnlyMode,
+                isReadOnly = state.isReadOnlyMode || state.isCorrupted,
                 placeholder = strings.bodyPlaceholder,
                 onValueChange = viewModel::onBodyValueChanged,
                 onReferenceTap = openReference,
-                onEnterEditMode = viewModel::enterEditMode
+                onEnterEditMode = {
+                    if (!state.isCorrupted) viewModel.enterEditMode()
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (!state.isReadOnlyMode && state.richContent.bibleRefs.isNotEmpty()) {
-                Text(
-                    text = strings.referencesInNoteLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    state.richContent.bibleRefs.forEach { ref ->
-                        AssistChip(
-                            onClick = { openReference(ref) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.MenuBook,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = { Text(ref.displayText) }
-                        )
-                    }
+            AnimatedVisibility(
+                visible = !state.isReadOnlyMode && !state.isCorrupted && showTagInput,
+                enter = expandVertically(tween(200)) + fadeIn(tween(180)),
+                exit = shrinkVertically(tween(160)) + fadeOut(tween(140))
+            ) {
+                Column {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TagInputWithSuggestions(
+                        tagDraft = tagDraft,
+                        onTagDraftChange = { tagDraft = it },
+                        existingTags = state.tags,
+                        availableTags = state.availableTags,
+                        placeholder = strings.addTagPlaceholder,
+                        onAddTag = { chosen ->
+                            viewModel.addTag(chosen)
+                            tagDraft = ""
+                            showTagInput = false
+                        }
+                    )
                 }
-                Spacer(modifier = Modifier.height(10.dp))
             }
 
-            if (showTagInput) {
-                TagInputWithSuggestions(
-                    tagDraft = tagDraft,
-                    onTagDraftChange = { tagDraft = it },
-                    existingTags = state.tags,
-                    availableTags = state.availableTags,
-                    placeholder = strings.addTagPlaceholder,
-                    onAddTag = { chosen ->
-                        viewModel.addTag(chosen)
-                        tagDraft = ""
-                        showTagInput = false
-                    }
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            if (state.tags.isNotEmpty()) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    state.tags.forEach { tag ->
-                        InputChip(
-                            selected = false,
-                            onClick = {},
-                            label = { Text("#$tag") },
-                            trailingIcon = {
-                                Icon(
-                                    imageVector = Icons.Filled.Close,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(16.dp)
-                                        .clickable { viewModel.removeTag(tag) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(animationSpec = tween(durationMillis = 200))
+            ) {
+                if (state.tags.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                            .animateContentSize(animationSpec = tween(durationMillis = 200))
+                    ) {
+                        state.tags.forEach { tag ->
+                            key(tag) {
+                                InputChip(
+                                    selected = false,
+                                    onClick = {},
+                                    label = { Text("#$tag") },
+                                    trailingIcon = if (!state.isReadOnlyMode && !state.isCorrupted) {
+                                        {
+                                            Icon(
+                                                imageVector = Icons.Filled.Close,
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .clickable { viewModel.removeTag(tag) }
+                                            )
+                                        }
+                                    } else {
+                                        null
+                                    }
                                 )
                             }
-                        )
+                        }
                     }
+                } else {
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 
@@ -383,6 +563,79 @@ fun NoteEditorScreen(
 }
 
 @Composable
+private fun CorruptedNoteRecoveryBanner(
+    rawContent: String,
+    strings: AppStrings,
+    onCopyRaw: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.errorContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.WarningAmber,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    text = strings.corruptedNoteTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+            Text(
+                text = strings.corruptedNoteDesc,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            if (rawContent.isNotBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 140.dp)
+                ) {
+                    Text(
+                        text = rawContent,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .verticalScroll(rememberScrollState())
+                            .padding(8.dp)
+                    )
+                }
+                OutlinedButton(
+                    onClick = onCopyRaw,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(strings.copyRawContentAction)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun RichNoteBodyArea(
     content: RichNoteContent,
     textFieldValue: TextFieldValue,
@@ -390,7 +643,8 @@ private fun RichNoteBodyArea(
     placeholder: String,
     onValueChange: (TextFieldValue) -> Unit,
     onReferenceTap: (BibleRefSpan) -> Unit,
-    onEnterEditMode: () -> Unit
+    onEnterEditMode: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val extraColors = LocalBibleNotesExtraColors.current
     val textColor = MaterialTheme.colorScheme.onBackground
@@ -405,24 +659,27 @@ private fun RichNoteBodyArea(
     if (isReadOnly) {
         Surface(
             shape = RoundedCornerShape(8.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onEnterEditMode)
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+            modifier = modifier.clickable(onClick = onEnterEditMode)
         ) {
-            BibleRefInlineText(
-                content = content,
-                placeholder = placeholder,
-                style = TextStyle(
-                    color = textColor,
-                    fontSize = 15.sp,
-                    lineHeight = 28.sp
-                ),
-                onReferenceClick = onReferenceTap,
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
                     .padding(12.dp)
-            )
+            ) {
+                BibleRefInlineText(
+                    content = content,
+                    placeholder = placeholder,
+                    style = TextStyle(
+                        color = textColor,
+                        fontSize = 15.sp,
+                        lineHeight = 28.sp
+                    ),
+                    onReferenceClick = onReferenceTap,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     } else {
         val visualTransformation = remember(annotated) {
@@ -432,9 +689,7 @@ private fun RichNoteBodyArea(
         }
 
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp)
+            modifier = modifier.padding(vertical = 4.dp)
         ) {
             if (textFieldValue.text.isEmpty()) {
                 Text(
@@ -454,9 +709,7 @@ private fun RichNoteBodyArea(
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 visualTransformation = visualTransformation,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(260.dp)
+                modifier = Modifier.fillMaxSize()
             )
         }
     }
@@ -516,120 +769,187 @@ private fun TagInputWithSuggestions(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EditorBottomSection(
-    state: NoteEditorUiState,
+private fun CompactEditorToolbar(
+    canUndo: Boolean,
+    canRedo: Boolean,
     strings: AppStrings,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
     onApplyHighlight: (HighlightColor?) -> Unit,
     onAddBibleRef: () -> Unit,
-    onAddTagClick: () -> Unit,
-    onDeleteClick: () -> Unit,
-    onCancelClick: () -> Unit,
-    onSaveClick: () -> Unit
+    onAddTagClick: () -> Unit
 ) {
+    var showHighlightPalette by remember { mutableStateOf(false) }
+
     Surface(
-        color = MaterialTheme.colorScheme.background,
+        color = MaterialTheme.colorScheme.surfaceContainer,
         tonalElevation = 2.dp,
-        modifier = Modifier.imePadding()
+        modifier = Modifier.fillMaxWidth()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .windowInsetsPadding(
+                    WindowInsets.navigationBars
+                        .union(WindowInsets.ime)
+                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+                )
         ) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
+
+            AnimatedVisibility(
+                visible = showHighlightPalette,
+                enter = expandVertically(tween(180)) + fadeIn(tween(160)),
+                exit = shrinkVertically(tween(150)) + fadeOut(tween(130))
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        HighlightColor.entries.forEach { color ->
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        onApplyHighlight(color)
+                                        showHighlightPalette = false
+                                    }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(color.argb))
+                                        .border(
+                                            width = 1.dp,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            shape = CircleShape
+                                        )
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = {
+                                onApplyHighlight(null)
+                                showHighlightPalette = false
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.FormatClear,
+                                contentDescription = strings.clearHighlightDesc,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+                }
+            }
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = strings.highlightLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                HighlightColor.entries.forEach { color ->
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .background(Color(color.argb))
-                            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
-                            .clickable(enabled = !state.isReadOnlyMode) {
-                                onApplyHighlight(color)
-                            }
-                    )
-                }
-
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
-                        .clickable(enabled = !state.isReadOnlyMode) {
-                            onApplyHighlight(null)
-                        }
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.FormatClear,
-                        contentDescription = strings.clearHighlightDesc,
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-            }
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onAddBibleRef,
-                    enabled = !state.isReadOnlyMode
-                ) {
-                    Text(strings.addBibleRef)
-                }
-                OutlinedButton(
-                    onClick = onAddTagClick,
-                    enabled = !state.isReadOnlyMode
-                ) {
-                    Text(strings.addTag)
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (state.activeNoteId != null) {
-                    OutlinedButton(
-                        onClick = onDeleteClick,
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onUndo,
+                        enabled = canUndo,
+                        modifier = Modifier.testTag("editor_undo_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Delete,
+                            imageVector = Icons.AutoMirrored.Filled.Undo,
+                            contentDescription = strings.undoDesc
+                        )
+                    }
+                    IconButton(
+                        onClick = onRedo,
+                        enabled = canRedo,
+                        modifier = Modifier.testTag("editor_redo_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Redo,
+                            contentDescription = strings.redoDesc
+                        )
+                    }
+                    IconButton(
+                        onClick = { showHighlightPalette = !showHighlightPalette },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(
+                                if (showHighlightPalette) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    Color.Transparent
+                                }
+                            )
+                            .testTag("toolbar_highlight_toggle")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.BorderColor,
+                            contentDescription = strings.highlightLabel,
+                            tint = if (showHighlightPalette) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = onAddBibleRef,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("toolbar_add_ref_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(strings.delete)
+                        Text(
+                            text = strings.addBibleRef,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
-                }
-                Spacer(modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = onCancelClick) {
-                    Text(strings.cancel)
-                }
-                Button(onClick = onSaveClick) {
-                    Text(strings.save)
+
+                    TextButton(
+                        onClick = onAddTagClick,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("toolbar_add_tag_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Label,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = strings.addTag,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }

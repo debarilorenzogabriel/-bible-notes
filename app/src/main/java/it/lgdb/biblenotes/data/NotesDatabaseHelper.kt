@@ -21,7 +21,8 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
                 $COL_TAGS_JSON TEXT NOT NULL,
                 $COL_CREATED_AT INTEGER NOT NULL,
                 $COL_UPDATED_AT INTEGER NOT NULL,
-                $COL_PINNED INTEGER NOT NULL DEFAULT 0
+                $COL_PINNED INTEGER NOT NULL DEFAULT 0,
+                $COL_DELETED_AT INTEGER DEFAULT NULL
             )
             """.trimIndent()
         )
@@ -32,15 +33,33 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
             )
             """.trimIndent()
         )
+        createDraftsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Future schema migrations will preserve existing local data
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE $TABLE_NOTES ADD COLUMN $COL_DELETED_AT INTEGER DEFAULT NULL")
+            createDraftsTable(db)
+        }
+    }
+
+    private fun createDraftsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_DRAFTS (
+                $COL_DRAFT_KEY TEXT PRIMARY KEY,
+                $COL_TITLE TEXT NOT NULL,
+                $COL_RICH_CONTENT_JSON TEXT NOT NULL,
+                $COL_TAGS_JSON TEXT NOT NULL,
+                $COL_UPDATED_AT INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
     }
 
     companion object {
         const val DATABASE_NAME = "biblenotes_native.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
 
         const val TABLE_NOTES = "notes"
         const val COL_ID = "id"
@@ -51,8 +70,12 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val COL_CREATED_AT = "created_at"
         const val COL_UPDATED_AT = "updated_at"
         const val COL_PINNED = "pinned"
+        const val COL_DELETED_AT = "deleted_at"
 
         const val TABLE_LABELS = "labels"
         const val COL_LABEL_NAME = "name"
+
+        const val TABLE_DRAFTS = "drafts"
+        const val COL_DRAFT_KEY = "note_key"
     }
 }

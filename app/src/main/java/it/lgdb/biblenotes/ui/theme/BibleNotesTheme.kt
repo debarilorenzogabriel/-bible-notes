@@ -2,6 +2,8 @@ package it.lgdb.biblenotes.ui.theme
 
 import android.app.Activity
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -12,6 +14,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -59,8 +62,8 @@ private val LightColors = lightColorScheme(
 )
 
 private val LightExtra = BibleNotesExtraColors(
-    noteCardGradientTop = Color(0xFFF9EFAF),
-    noteCardGradientBottom = Color(0xFFF7E98D),
+    noteCardGradientTop = Color(0xFFFCF5C9),
+    noteCardGradientBottom = Color(0xFFF9EEA8),
     pinColor = Color(0xFFC0392B),
     chipBg = Color(0xFFE1ECFF),
     chipText = Color(0xFF003087),
@@ -86,9 +89,9 @@ private val DarkColors = darkColorScheme(
 )
 
 private val DarkExtra = BibleNotesExtraColors(
-    noteCardGradientTop = Color(0xFF2A2F38),
-    noteCardGradientBottom = Color(0xFF22252C),
-    pinColor = Color(0xFFC0392B),
+    noteCardGradientTop = Color(0xFF272C35),
+    noteCardGradientBottom = Color(0xFF21252D),
+    pinColor = Color(0xFFE06C65),
     chipBg = Color(0xFF2B3B5C),
     chipText = Color(0xFFE5ECFF),
     footerBg = Color(0xFF1E1E1E),
@@ -113,8 +116,8 @@ private val SepiaColors = lightColorScheme(
 )
 
 private val SepiaExtra = BibleNotesExtraColors(
-    noteCardGradientTop = Color(0xFFF5E1B5),
-    noteCardGradientBottom = Color(0xFFF1D39A),
+    noteCardGradientTop = Color(0xFFF7E8C6),
+    noteCardGradientBottom = Color(0xFFF2DCB0),
     pinColor = Color(0xFFC0392B),
     chipBg = Color(0xFFF0D8B0),
     chipText = Color(0xFF5B3A1A),
@@ -140,8 +143,8 @@ private val BlueColors = lightColorScheme(
 )
 
 private val BlueExtra = BibleNotesExtraColors(
-    noteCardGradientTop = Color(0xFFF0F6FF),
-    noteCardGradientBottom = Color(0xFFE0EBFF),
+    noteCardGradientTop = Color(0xFFF2F7FF),
+    noteCardGradientBottom = Color(0xFFE4EEFF),
     pinColor = Color(0xFFC0392B),
     chipBg = Color(0xFFD3E3FF),
     chipText = Color(0xFF003087),
@@ -151,12 +154,55 @@ private val BlueExtra = BibleNotesExtraColors(
 
 private fun dynamicExtraColors(scheme: ColorScheme): BibleNotesExtraColors = BibleNotesExtraColors(
     noteCardGradientTop = scheme.surfaceContainerHigh,
-    noteCardGradientBottom = scheme.secondaryContainer,
+    noteCardGradientBottom = scheme.secondaryContainer.copy(alpha = 0.72f),
     pinColor = scheme.error,
     chipBg = scheme.primaryContainer,
     chipText = scheme.onPrimaryContainer,
     footerBg = scheme.surfaceContainer,
     footerActiveBg = scheme.secondaryContainer
+)
+
+private val ThemeColorSpec = tween<Color>(durationMillis = 300)
+
+@Composable
+private fun animColor(target: Color): Color {
+    val color by animateColorAsState(targetValue = target, animationSpec = ThemeColorSpec, label = "theme_color")
+    return color
+}
+
+@Composable
+private fun animatedColorScheme(target: ColorScheme): ColorScheme = target.copy(
+    primary = animColor(target.primary),
+    onPrimary = animColor(target.onPrimary),
+    primaryContainer = animColor(target.primaryContainer),
+    onPrimaryContainer = animColor(target.onPrimaryContainer),
+    secondary = animColor(target.secondary),
+    onSecondary = animColor(target.onSecondary),
+    secondaryContainer = animColor(target.secondaryContainer),
+    onSecondaryContainer = animColor(target.onSecondaryContainer),
+    background = animColor(target.background),
+    onBackground = animColor(target.onBackground),
+    surface = animColor(target.surface),
+    onSurface = animColor(target.onSurface),
+    surfaceVariant = animColor(target.surfaceVariant),
+    onSurfaceVariant = animColor(target.onSurfaceVariant),
+    surfaceContainer = animColor(target.surfaceContainer),
+    surfaceContainerHigh = animColor(target.surfaceContainerHigh),
+    outline = animColor(target.outline),
+    error = animColor(target.error),
+    errorContainer = animColor(target.errorContainer),
+    onErrorContainer = animColor(target.onErrorContainer)
+)
+
+@Composable
+private fun animatedExtraColors(target: BibleNotesExtraColors): BibleNotesExtraColors = BibleNotesExtraColors(
+    noteCardGradientTop = animColor(target.noteCardGradientTop),
+    noteCardGradientBottom = animColor(target.noteCardGradientBottom),
+    pinColor = animColor(target.pinColor),
+    chipBg = animColor(target.chipBg),
+    chipText = animColor(target.chipText),
+    footerBg = animColor(target.footerBg),
+    footerActiveBg = animColor(target.footerActiveBg)
 )
 
 @Composable
@@ -167,7 +213,7 @@ fun BibleNotesTheme(
     val systemDark = isSystemInDarkTheme()
     val context = LocalContext.current
 
-    val (colorScheme, extraColors, isDarkTheme) = when (themeOption) {
+    val (targetScheme, targetExtra, isDarkTheme) = when (themeOption) {
         ThemeOption.LIGHT -> Triple(LightColors, LightExtra, false)
         ThemeOption.DARK -> Triple(DarkColors, DarkExtra, true)
         ThemeOption.SEPIA -> Triple(SepiaColors, SepiaExtra, false)
@@ -181,6 +227,9 @@ fun BibleNotesTheme(
             Triple(scheme, dynamicExtraColors(scheme), systemDark)
         }
     }
+
+    val colorScheme = animatedColorScheme(targetScheme)
+    val extraColors = animatedExtraColors(targetExtra)
 
     val view = LocalView.current
     if (!view.isInEditMode) {

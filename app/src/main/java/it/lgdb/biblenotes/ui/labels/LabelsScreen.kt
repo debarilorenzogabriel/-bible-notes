@@ -1,11 +1,11 @@
 package it.lgdb.biblenotes.ui.labels
 
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,18 +13,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import it.lgdb.biblenotes.domain.AppStrings
 import it.lgdb.biblenotes.ui.theme.LocalBibleNotesExtraColors
@@ -134,7 +137,12 @@ fun LabelsScreen(
                         strings = strings,
                         onSearchClick = { onSearchByLabel(tag) },
                         onRenameClick = { renameTarget = tag },
-                        onDeleteClick = { deleteTarget = tag }
+                        onDeleteClick = { deleteTarget = tag },
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(durationMillis = 180),
+                            fadeOutSpec = tween(durationMillis = 150),
+                            placementSpec = tween(durationMillis = 220)
+                        )
                     )
                 }
             }
@@ -234,70 +242,78 @@ fun LabelsScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun LabelRowCard(
     label: String,
     strings: AppStrings,
     onSearchClick: () -> Unit,
     onRenameClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val extraColors = LocalBibleNotesExtraColors.current
 
     Surface(
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = Modifier.fillMaxWidth()
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSearchClick)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = extraColors.chipBg
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 6.dp)
             ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = extraColors.chipText,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                )
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = extraColors.chipBg
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = extraColors.chipText,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
             }
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                LabelActionPill(strings.labelActionSearch, onSearchClick)
-                LabelActionPill(strings.labelActionRename, onRenameClick)
-                LabelActionPill(strings.labelActionDelete, onDeleteClick)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onSearchClick) {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = strings.labelActionSearch,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(onClick = onRenameClick) {
+                    Icon(
+                        imageVector = Icons.Filled.Edit,
+                        contentDescription = strings.labelActionRename,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(onClick = onDeleteClick) {
+                    Icon(
+                        imageVector = Icons.Filled.DeleteOutline,
+                        contentDescription = strings.labelActionDelete,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
-    }
-}
-
-@Composable
-private fun LabelActionPill(
-    text: String,
-    onClick: () -> Unit
-) {
-    OutlinedButton(
-        onClick = onClick,
-        shape = RoundedCornerShape(999.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary
-        )
     }
 }

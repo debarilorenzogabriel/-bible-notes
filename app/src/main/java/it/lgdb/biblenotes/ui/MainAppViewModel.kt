@@ -10,7 +10,10 @@ import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.domain.NoteSorter
 import it.lgdb.biblenotes.domain.appStrings
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.ImportMode
+import it.lgdb.biblenotes.model.ImportSummary
 import it.lgdb.biblenotes.model.NoteRecord
+import it.lgdb.biblenotes.model.NoteSortOption
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,17 +33,27 @@ enum class MainTab {
 data class MainAppUiState(
     val currentTab: MainTab = MainTab.HOME,
     val isEditorOpen: Boolean = false,
+    val isTrashOpen: Boolean = false,
     val editorTargetNoteId: String? = null,
     val allNotes: List<NoteRecord> = emptyList(),
+    val trashedNotes: List<NoteRecord> = emptyList(),
     val homeSearchQuery: String = "",
+    val selectedLabelFilter: String? = null,
+    val sortOption: NoteSortOption = NoteSortOption.UPDATED_DESC,
     val allLabels: List<String> = emptyList(),
     val labelSearchQuery: String = "",
     val openWithJwLibrary: Boolean = false,
     val themeOption: ThemeOption = ThemeOption.LIGHT,
-    val language: AppLanguage = AppLanguage.IT
+    val language: AppLanguage = AppLanguage.IT,
+    val hasSafetyBackup: Boolean = false,
+    val lastImportSummary: ImportSummary? = null
 ) {
     val filteredNotes: List<NoteRecord>
-        get() = NoteSorter.filterNotes(allNotes, homeSearchQuery)
+        get() = NoteSorter.filterNotes(
+            notes = allNotes,
+            query = homeSearchQuery,
+            labelFilter = selectedLabelFilter
+        )
 
     val filteredLabels: List<String>
         get() {
@@ -62,7 +75,9 @@ class MainAppViewModel(
         MainAppUiState(
             openWithJwLibrary = repository.getOpenWithJwLibrary(),
             themeOption = repository.getTheme(),
-            language = repository.getLanguage()
+            language = repository.getLanguage(),
+            sortOption = repository.getSortOption(),
+            hasSafetyBackup = repository.hasSafetyBackup()
         )
     )
     val uiState: StateFlow<MainAppUiState> = _uiState.asStateFlow()
@@ -70,28 +85,60 @@ class MainAppViewModel(
     private val _events = MutableSharedFlow<AppMessageEvent>()
     val events: SharedFlow<AppMessageEvent> = _events.asSharedFlow()
 
+    private var pendingExportJson: String? = null
+
     init {
         refreshData()
     }
 
     fun refreshData() {
         viewModelScope.launch {
-            val notes = repository.getAllNotes()
-            val labels = repository.getAllTags()
-            _uiState.update {
-                it.copy(
-                    allNotes = notes,
-                    allLabels = labels
-                )
+            val strings = appStrings(_uiState.value.language)
+            runCatching {
+                val sortOpt = _uiState.value.sortOption
+                val notes = repository.getAllNotes(sortOpt)
+                val trashed = repository.getTrashedNotes()
+                val labels = repository.getAllTags()
+                val safety = repository.hasSafetyBackup()
+                Triple(notes, trashed, labels) to safety
+            }.onSuccess { (triple, safety) ->
+                val (notes, trashed, labels) = triple
+                val currentFilter = _uiState.value.selectedLabelFilter
+                val resolvedFilter = if (currentFilter != null) {
+                    labels.firstOrNull { it.equals(currentFilter, ignoreCase = true) }
+                } else {
+                    null
+                }
+                _uiState.update {
+                    it.copy(
+                        allNotes = notes,
+                        trashedNotes = trashed,
+                        allLabels = labels,
+                        selectedLabelFilter = resolvedFilter,
+                        hasSafetyBackup = safety
+                    )
+                }
+            }.onFailure { err ->
+                emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
             }
         }
     }
 
     fun selectTab(tab: MainTab) {
-        _uiState.update { it.copy(currentTab = tab) }
-        if (tab == MainTab.LABELS || tab == MainTab.HOME) {
+        _uiState.update { it.copy(currentTab = tab, isTrashOpen = false) }
+        if (tab == MainTab.LABELS || tab == MainTab.HOME || tab == MainTab.SETTINGS) {
             refreshData()
         }
+    }
+
+    fun openTrash() {
+        _uiState.update { it.copy(isTrashOpen = true) }
+        refreshData()
+    }
+
+    fun closeTrash() {
+        _uiState.update { it.copy(isTrashOpen = false) }
+        refreshData()
     }
 
     fun openNewNoteEditor() {
@@ -126,29 +173,85 @@ class MainAppViewModel(
         _uiState.update { it.copy(homeSearchQuery = query) }
     }
 
+    fun clearLabelFilter() {
+        _uiState.update { it.copy(selectedLabelFilter = null) }
+    }
+
     fun onLabelSearchQueryChanged(query: String) {
         _uiState.update { it.copy(labelSearchQuery = query) }
     }
 
+    fun setSortOption(option: NoteSortOption) {
+        repository.setSortOption(option)
+        _uiState.update { it.copy(sortOption = option) }
+        refreshData()
+    }
+
     fun togglePinNote(noteId: String) {
         viewModelScope.launch {
-            when (repository.togglePinNote(noteId)) {
-                is PinToggleResult.MaxLimitReached -> {
-                    emitMessage(appStrings(_uiState.value.language).maxPinnedReached)
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.togglePinNote(noteId) }
+                .onSuccess { result ->
+                    when (result) {
+                        is PinToggleResult.MaxLimitReached -> emitMessage(strings.maxPinnedReached)
+                        is PinToggleResult.Toggled,
+                        PinToggleResult.NotFound -> refreshData()
+                    }
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
                 }
-                is PinToggleResult.Toggled,
-                PinToggleResult.NotFound -> {
-                    refreshData()
-                }
-            }
         }
     }
 
     fun deleteNote(noteId: String) {
         viewModelScope.launch {
-            repository.deleteNote(noteId)
-            refreshData()
-            emitMessage(appStrings(_uiState.value.language).noteDeletedMessage)
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.moveNoteToTrash(noteId) }
+                .onSuccess {
+                    refreshData()
+                    emitMessage(strings.noteMovedToTrashMessage)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
+        }
+    }
+
+    fun restoreTrashedNote(noteId: String) {
+        viewModelScope.launch {
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.restoreNoteFromTrash(noteId) }
+                .onSuccess {
+                    refreshData()
+                    emitMessage(strings.noteRestoredMessage)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
+        }
+    }
+
+    fun permanentlyDeleteNote(noteId: String) {
+        viewModelScope.launch {
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.permanentlyDeleteNote(noteId) }
+                .onSuccess {
+                    refreshData()
+                    emitMessage(strings.noteDeletedMessage)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
+        }
+    }
+
+    fun emptyTrash() {
+        viewModelScope.launch {
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.emptyTrash() }
+                .onSuccess {
+                    refreshData()
+                    emitMessage(strings.trashEmptiedMessage)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
         }
     }
 
@@ -156,11 +259,14 @@ class MainAppViewModel(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
-            val created = repository.createLabel(trimmed)
-            refreshData()
-            if (!created) {
-                emitMessage(appStrings(_uiState.value.language).labelAlreadyExists)
-            }
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.createLabel(trimmed) }
+                .onSuccess { created ->
+                    refreshData()
+                    if (!created) emitMessage(strings.labelAlreadyExists)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
         }
     }
 
@@ -168,23 +274,54 @@ class MainAppViewModel(
         val trimmed = newName.trim()
         if (trimmed.isEmpty() || trimmed == oldName) return
         viewModelScope.launch {
-            repository.renameLabel(oldName, trimmed)
-            refreshData()
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.renameLabel(oldName, trimmed) }
+                .onSuccess { renamed ->
+                    if (!renamed) {
+                        emitMessage(strings.labelAlreadyExists)
+                    } else {
+                        _uiState.update { state ->
+                            val updatedFilter = if (state.selectedLabelFilter?.equals(oldName, ignoreCase = true) == true) {
+                                trimmed
+                            } else {
+                                state.selectedLabelFilter
+                            }
+                            state.copy(selectedLabelFilter = updatedFilter)
+                        }
+                        refreshData()
+                    }
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
         }
     }
 
     fun deleteLabel(name: String) {
         viewModelScope.launch {
-            repository.deleteLabel(name)
-            refreshData()
+            val strings = appStrings(_uiState.value.language)
+            runCatching { repository.deleteLabel(name) }
+                .onSuccess {
+                    _uiState.update { state ->
+                        val updatedFilter = if (state.selectedLabelFilter?.equals(name, ignoreCase = true) == true) {
+                            null
+                        } else {
+                            state.selectedLabelFilter
+                        }
+                        state.copy(selectedLabelFilter = updatedFilter)
+                    }
+                    refreshData()
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
         }
     }
 
     fun filterNotesByLabel(label: String) {
         _uiState.update {
             it.copy(
-                homeSearchQuery = label,
-                currentTab = MainTab.HOME
+                selectedLabelFilter = label,
+                currentTab = MainTab.HOME,
+                isTrashOpen = false
             )
         }
     }
@@ -208,18 +345,22 @@ class MainAppViewModel(
         emitMessage(message)
     }
 
-    private var pendingExportJson: String? = null
-
     suspend fun prepareBackupJson(): String? {
-        val notes = repository.getAllNotes()
-        val labels = repository.getAllTags()
-        if (notes.isEmpty() && labels.isEmpty()) {
-            pendingExportJson = null
-            return null
-        }
-        return BackupSerializer.encode(notes = notes, labels = labels).also {
-            pendingExportJson = it
-        }
+        val strings = appStrings(_uiState.value.language)
+        return runCatching {
+            val notes = repository.getAllNotes()
+            val labels = repository.getAllTags()
+            if (notes.isEmpty() && labels.isEmpty()) {
+                pendingExportJson = null
+                null
+            } else {
+                BackupSerializer.encode(notes = notes, labels = labels).also {
+                    pendingExportJson = it
+                }
+            }
+        }.onFailure { err ->
+            emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+        }.getOrNull()
     }
 
     fun consumePendingExportJson(): String? {
@@ -232,14 +373,40 @@ class MainAppViewModel(
         pendingExportJson = null
     }
 
-    fun importBackup(payload: BackupPayload) {
+    fun importBackup(payload: BackupPayload, mode: ImportMode) {
         viewModelScope.launch {
-            repository.replaceAllData(
-                notes = payload.notes,
-                labels = payload.allLabels
-            )
-            refreshData()
-            emitMessage(appStrings(_uiState.value.language).backupImportSuccess)
+            val strings = appStrings(_uiState.value.language)
+            runCatching {
+                repository.importBackup(payload = payload, mode = mode)
+            }.onSuccess { summary ->
+                refreshData()
+                _uiState.update { it.copy(lastImportSummary = summary) }
+            }.onFailure { err ->
+                emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+            }
+        }
+    }
+
+    fun dismissImportSummary() {
+        _uiState.update { it.copy(lastImportSummary = null) }
+    }
+
+    fun restoreSafetyBackup() {
+        viewModelScope.launch {
+            val strings = appStrings(_uiState.value.language)
+            val payloadResult = repository.readSafetyBackup()
+            payloadResult.onFailure {
+                emitMessage(strings.backupImportError)
+            }.onSuccess { payload ->
+                runCatching {
+                    repository.importBackup(payload = payload, mode = ImportMode.REPLACE_ALL)
+                }.onSuccess {
+                    refreshData()
+                    emitMessage(strings.backupSafetyRestoredMessage)
+                }.onFailure { err ->
+                    emitMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}")
+                }
+            }
         }
     }
 

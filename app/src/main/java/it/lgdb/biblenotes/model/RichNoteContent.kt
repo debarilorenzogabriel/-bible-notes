@@ -1,6 +1,7 @@
 package it.lgdb.biblenotes.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 
 @Serializable
 enum class HighlightColor(
@@ -58,7 +59,38 @@ data class NoteRecord(
     val tags: List<String>,
     val createdAt: Long,
     val updatedAt: Long,
-    val pinned: Boolean
+    val pinned: Boolean,
+    val deletedAt: Long? = null,
+    @Transient val isCorrupted: Boolean = false,
+    @Transient val rawCorruptedJson: String? = null
+)
+
+data class DraftRecord(
+    val noteKey: String,
+    val title: String,
+    val content: RichNoteContent,
+    val tags: List<String>,
+    val updatedAt: Long
+)
+
+enum class NoteSortOption {
+    UPDATED_DESC,
+    CREATED_DESC,
+    TITLE_ASC
+}
+
+enum class ImportMode {
+    MERGE,
+    REPLACE_ALL
+}
+
+data class ImportSummary(
+    val mode: ImportMode,
+    val importedCount: Int,
+    val ignoredCount: Int,
+    val invalidCount: Int,
+    val labelsCount: Int,
+    val safetyBackupCreated: Boolean
 )
 
 enum class ThemeOption {
