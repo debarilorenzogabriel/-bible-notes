@@ -27,4 +27,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "BibleNotesNative"
 include(":app")
-project(":app").projectDir = file("native-android/app")
