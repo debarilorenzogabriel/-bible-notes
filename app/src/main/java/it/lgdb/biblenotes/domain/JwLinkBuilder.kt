@@ -1,6 +1,7 @@
 package it.lgdb.biblenotes.domain
 
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
 import it.lgdb.biblenotes.model.BibleRefSpan
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -19,6 +20,31 @@ object JwLinkBuilder {
         } else {
             "$cleanBook $chapter"
         }
+    }
+
+    fun formatReference(
+        ref: BibleRefSpan,
+        language: AppLanguage = AppLanguage.IT,
+        style: BibleRefDisplayStyle = BibleRefDisplayStyle.ABBREVIATED
+    ): String = when (style) {
+        BibleRefDisplayStyle.ABBREVIATED -> formatAbbreviatedReference(ref, language)
+        BibleRefDisplayStyle.FULL -> formatFullReference(ref, language)
+    }
+
+    fun formatAbbreviatedReference(
+        ref: BibleRefSpan,
+        language: AppLanguage = AppLanguage.IT
+    ): String {
+        val shortBook = BibleCatalog.findByNumber(ref.bookNumber)?.localizedAbbr(language) ?: ref.bookName
+        return formatReferenceDisplay(shortBook, ref.chapter, ref.verseSpec)
+    }
+
+    fun formatFullReference(
+        ref: BibleRefSpan,
+        language: AppLanguage = AppLanguage.IT
+    ): String {
+        val fullBook = BibleCatalog.findByNumber(ref.bookNumber)?.localizedName(language) ?: ref.bookName
+        return formatReferenceDisplay(fullBook, ref.chapter, ref.verseSpec)
     }
 
     fun buildBibleCode(

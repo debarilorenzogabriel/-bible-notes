@@ -1,5 +1,6 @@
 package it.lgdb.biblenotes
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -32,7 +33,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -52,6 +55,7 @@ import it.lgdb.biblenotes.ui.settings.SettingsScreen
 import it.lgdb.biblenotes.ui.theme.BibleNotesTheme
 import it.lgdb.biblenotes.ui.theme.LocalBibleNotesExtraColors
 import it.lgdb.biblenotes.ui.trash.TrashScreen
+import it.lgdb.biblenotes.widget.PinnedNotesWidgetProvider
 import kotlinx.coroutines.flow.collectLatest
 
 private sealed interface RootScreen {
@@ -63,10 +67,18 @@ private sealed interface RootScreen {
 class MainActivity : ComponentActivity() {
 
     private lateinit var repository: NotesRepository
+    private var pendingWidgetIntent by mutableStateOf<Intent?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingWidgetIntent = intent
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = NotesRepository(applicationContext)
+        pendingWidgetIntent = intent
         enableEdgeToEdge()
 
         setContent {
@@ -82,6 +94,27 @@ class MainActivity : ComponentActivity() {
             val strings = remember(appState.language) { appStrings(appState.language) }
             val snackbarHostState = remember { SnackbarHostState() }
 
+            LaunchedEffect(pendingWidgetIntent) {
+                val widgetIntent = pendingWidgetIntent ?: return@LaunchedEffect
+                when (widgetIntent.action) {
+                    PinnedNotesWidgetProvider.ACTION_WIDGET_NEW_NOTE -> {
+                        appViewModel.openNewNoteEditor()
+                    }
+                    PinnedNotesWidgetProvider.ACTION_WIDGET_OPEN_NOTE -> {
+                        val noteId = widgetIntent.getStringExtra(PinnedNotesWidgetProvider.EXTRA_NOTE_ID)
+                        if (!noteId.isNullOrBlank()) {
+                            appViewModel.openNoteEditor(noteId)
+                        } else {
+                            appViewModel.openHomeFromWidget()
+                        }
+                    }
+                    PinnedNotesWidgetProvider.ACTION_WIDGET_OPEN_HOME -> {
+                        appViewModel.openHomeFromWidget()
+                    }
+                }
+                pendingWidgetIntent = null
+            }
+
             LaunchedEffect(Unit) {
                 appViewModel.events.collectLatest { event ->
                     when (event) {
@@ -90,13 +123,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            LaunchedEffect(appState.isEditorOpen, appState.editorTargetNoteId) {
+            LaunchedEffect(appState.isEditorOpen, appState.editorTargetNoteId, appState.editorSessionNonce) {
                 if (appState.isEditorOpen) {
                     editorViewModel.loadSession(
                         noteId = appState.editorTargetNoteId,
                         openWithJwLibrary = appState.openWithJwLibrary,
                         themeOption = appState.themeOption,
-                        language = appState.language
+                        language = appState.language,
+                        keepScreenOnInReadMode = appState.keepScreenOnInReadMode,
+                        bibleRefDisplayStyle = appState.bibleRefDisplayStyle,
+                        smartListsEnabled = appState.smartListsEnabled,
+                        noteTextSize = appState.noteTextSize
                     )
                 }
             }
@@ -158,6 +195,7 @@ class MainActivity : ComponentActivity() {
                                     state = editorState,
                                     viewModel = editorViewModel,
                                     onCloseEditor = { appViewModel.closeEditor() },
+                                    onTextSizeChanged = appViewModel::setNoteTextSize,
                                     sharedNoteId = screen.noteId,
                                     sharedTransitionScope = sharedTransitionScope,
                                     animatedVisibilityScope = animatedVisibilityScope
@@ -253,6 +291,8 @@ class MainActivity : ComponentActivity() {
                                                         selectedLabelFilter = appState.selectedLabelFilter,
                                                         sortOption = appState.sortOption,
                                                         trashedCount = appState.trashedNotes.size,
+                                                        homeLayoutMode = appState.homeLayoutMode,
+                                                        bibleRefStyle = appState.bibleRefDisplayStyle,
                                                         strings = strings,
                                                         onSearchQueryChange = appViewModel::onHomeSearchQueryChanged,
                                                         onClearLabelFilter = appViewModel::clearLabelFilter,
@@ -265,6 +305,7 @@ class MainActivity : ComponentActivity() {
                                                         onNoteCopied = {
                                                             appViewModel.notifyMessage(strings.copiedToClipboard)
                                                         },
+                                                        onNotifyMessage = appViewModel::notifyMessage,
                                                         sharedTransitionScope = sharedTransitionScope,
                                                         animatedVisibilityScope = animatedVisibilityScope
                                                     )
@@ -288,12 +329,26 @@ class MainActivity : ComponentActivity() {
                                                         openWithJwLibrary = appState.openWithJwLibrary,
                                                         themeOption = appState.themeOption,
                                                         language = appState.language,
+                                                        keepScreenOnInReadMode = appState.keepScreenOnInReadMode,
+                                                        bibleRefDisplayStyle = appState.bibleRefDisplayStyle,
+                                                        smartListsEnabled = appState.smartListsEnabled,
+                                                        homeLayoutMode = appState.homeLayoutMode,
+                                                        noteTextSize = appState.noteTextSize,
+                                                        activeNotesCount = appState.allNotes.size,
+                                                        trashedNotesCount = appState.trashedNotes.size,
+                                                        labelsCount = appState.allLabels.size,
+                                                        savedRefsCount = appState.totalSavedRefsCount,
                                                         hasSafetyBackup = appState.hasSafetyBackup,
                                                         importSummary = appState.lastImportSummary,
                                                         strings = strings,
                                                         onToggleJwLibrary = appViewModel::setOpenWithJwLibrary,
                                                         onSelectTheme = appViewModel::setTheme,
                                                         onSelectLanguage = appViewModel::setLanguage,
+                                                        onToggleKeepScreenOnInReadMode = appViewModel::setKeepScreenOnInReadMode,
+                                                        onSelectBibleRefDisplayStyle = appViewModel::setBibleRefDisplayStyle,
+                                                        onToggleSmartLists = appViewModel::setSmartListsEnabled,
+                                                        onSelectHomeLayoutMode = appViewModel::setHomeLayoutMode,
+                                                        onSelectNoteTextSize = appViewModel::setNoteTextSize,
                                                         onPrepareBackupJson = appViewModel::prepareBackupJson,
                                                         onConsumePendingExportJson = appViewModel::consumePendingExportJson,
                                                         onClearPendingExportJson = appViewModel::clearPendingExportJson,

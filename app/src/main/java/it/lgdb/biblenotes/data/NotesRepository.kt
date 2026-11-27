@@ -9,13 +9,17 @@ import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.domain.DraftEpochCoordinator
 import it.lgdb.biblenotes.domain.NoteSorter
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
 import it.lgdb.biblenotes.model.DraftRecord
+import it.lgdb.biblenotes.model.HomeLayoutMode
 import it.lgdb.biblenotes.model.ImportMode
 import it.lgdb.biblenotes.model.ImportSummary
 import it.lgdb.biblenotes.model.NoteRecord
 import it.lgdb.biblenotes.model.NoteSortOption
+import it.lgdb.biblenotes.model.NoteTextSize
 import it.lgdb.biblenotes.model.RichNoteContent
 import it.lgdb.biblenotes.model.ThemeOption
+import it.lgdb.biblenotes.widget.PinnedNotesWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -76,6 +80,15 @@ class NotesRepository(context: Context) {
             sortedResult.sorted
         }
 
+    fun getPinnedNotesSync(limit: Int = NoteSorter.MAX_PINNED_NOTES): List<NoteRecord> {
+        val db = dbHelper.readableDatabase
+        return queryNotesInternal(
+            db = db,
+            selection = "${NotesDatabaseHelper.COL_DELETED_AT} IS NULL AND ${NotesDatabaseHelper.COL_PINNED} = 1",
+            orderBy = "${NotesDatabaseHelper.COL_UPDATED_AT} DESC"
+        ).take(limit)
+    }
+
     suspend fun getTrashedNotes(): List<NoteRecord> = withContext(Dispatchers.IO) {
         val db = dbHelper.writableDatabase
         purgeExpiredTrashInternal(db, System.currentTimeMillis())
@@ -112,6 +125,7 @@ class NotesRepository(context: Context) {
         } finally {
             db.endTransaction()
         }
+        PinnedNotesWidgetProvider.refreshAll(appContext)
     }
 
     suspend fun saveNoteAndDeleteDraft(note: NoteRecord, draftKey: String) {
@@ -131,6 +145,7 @@ class NotesRepository(context: Context) {
                 } finally {
                     db.endTransaction()
                 }
+                PinnedNotesWidgetProvider.refreshAll(appContext)
             }
         }
     }
@@ -196,6 +211,7 @@ class NotesRepository(context: Context) {
                 } finally {
                     db.endTransaction()
                 }
+                PinnedNotesWidgetProvider.refreshAll(appContext)
             }
         }
     }
@@ -204,6 +220,20 @@ class NotesRepository(context: Context) {
         val db = dbHelper.writableDatabase
         val values = ContentValues().apply {
             putNull(NotesDatabaseHelper.COL_DELETED_AT)
+        }
+        db.update(
+            NotesDatabaseHelper.TABLE_NOTES,
+            values,
+            "${NotesDatabaseHelper.COL_ID} = ?",
+            arrayOf(id)
+        )
+        PinnedNotesWidgetProvider.refreshAll(appContext)
+    }
+
+    suspend fun setNoteLocked(id: String, locked: Boolean) = withContext(Dispatchers.IO) {
+        val db = dbHelper.writableDatabase
+        val values = ContentValues().apply {
+            put(NotesDatabaseHelper.COL_LOCKED, if (locked) 1 else 0)
         }
         db.update(
             NotesDatabaseHelper.TABLE_NOTES,
@@ -233,6 +263,7 @@ class NotesRepository(context: Context) {
                 } finally {
                     db.endTransaction()
                 }
+                PinnedNotesWidgetProvider.refreshAll(appContext)
             }
         }
     }
@@ -244,6 +275,7 @@ class NotesRepository(context: Context) {
             "${NotesDatabaseHelper.COL_DELETED_AT} IS NOT NULL",
             null
         )
+        PinnedNotesWidgetProvider.refreshAll(appContext)
     }
 
     suspend fun getDraft(noteKey: String): DraftRecord? = withContext(Dispatchers.IO) {
@@ -496,6 +528,8 @@ class NotesRepository(context: Context) {
             } finally {
                 db.endTransaction()
             }
+        }.also {
+            PinnedNotesWidgetProvider.refreshAll(appContext)
         }
 
     fun hasSafetyBackup(): Boolean = safetyBackupFile.exists() && safetyBackupFile.length() > 0L
@@ -512,6 +546,7 @@ class NotesRepository(context: Context) {
         val target = allNotes.firstOrNull { it.id == noteId } ?: return@withContext PinToggleResult.NotFound
         if (target.pinned) {
             updatePinnedFlag(noteId, false)
+            PinnedNotesWidgetProvider.refreshAll(appContext)
             PinToggleResult.Toggled(false)
         } else {
             val pinnedCount = allNotes.count { it.pinned }
@@ -519,6 +554,7 @@ class NotesRepository(context: Context) {
                 PinToggleResult.MaxLimitReached
             } else {
                 updatePinnedFlag(noteId, true)
+                PinnedNotesWidgetProvider.refreshAll(appContext)
                 PinToggleResult.Toggled(true)
             }
         }
@@ -673,6 +709,7 @@ class NotesRepository(context: Context) {
 
     fun setLanguage(language: AppLanguage) {
         prefs.edit().putString(KEY_LANGUAGE, language.name).apply()
+        PinnedNotesWidgetProvider.refreshAll(appContext)
     }
 
     fun getSortOption(): NoteSortOption {
@@ -683,6 +720,54 @@ class NotesRepository(context: Context) {
 
     fun setSortOption(option: NoteSortOption) {
         prefs.edit().putString(KEY_SORT_OPTION, option.name).apply()
+    }
+
+    fun getKeepScreenOnInReadMode(): Boolean =
+        prefs.getBoolean(KEY_KEEP_SCREEN_ON_READ, false)
+
+    fun setKeepScreenOnInReadMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_KEEP_SCREEN_ON_READ, enabled).apply()
+    }
+
+    fun getBibleRefDisplayStyle(): BibleRefDisplayStyle {
+        val raw = prefs.getString(KEY_BIBLE_REF_STYLE, BibleRefDisplayStyle.ABBREVIATED.name)
+            ?: BibleRefDisplayStyle.ABBREVIATED.name
+        return runCatching { BibleRefDisplayStyle.valueOf(raw) }
+            .getOrDefault(BibleRefDisplayStyle.ABBREVIATED)
+    }
+
+    fun setBibleRefDisplayStyle(style: BibleRefDisplayStyle) {
+        prefs.edit().putString(KEY_BIBLE_REF_STYLE, style.name).apply()
+        PinnedNotesWidgetProvider.refreshAll(appContext)
+    }
+
+    fun getSmartListsEnabled(): Boolean =
+        prefs.getBoolean(KEY_SMART_LISTS, true)
+
+    fun setSmartListsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SMART_LISTS, enabled).apply()
+    }
+
+    fun getHomeLayoutMode(): HomeLayoutMode {
+        val raw = prefs.getString(KEY_HOME_LAYOUT, HomeLayoutMode.GRID.name)
+            ?: HomeLayoutMode.GRID.name
+        return runCatching { HomeLayoutMode.valueOf(raw) }
+            .getOrDefault(HomeLayoutMode.GRID)
+    }
+
+    fun setHomeLayoutMode(mode: HomeLayoutMode) {
+        prefs.edit().putString(KEY_HOME_LAYOUT, mode.name).apply()
+    }
+
+    fun getNoteTextSize(): NoteTextSize {
+        val raw = prefs.getString(KEY_NOTE_TEXT_SIZE, NoteTextSize.NORMAL.name)
+            ?: NoteTextSize.NORMAL.name
+        return runCatching { NoteTextSize.valueOf(raw) }
+            .getOrDefault(NoteTextSize.NORMAL)
+    }
+
+    fun setNoteTextSize(size: NoteTextSize) {
+        prefs.edit().putString(KEY_NOTE_TEXT_SIZE, size.name).apply()
     }
 
     private fun purgeExpiredTrashInternal(db: SQLiteDatabase, now: Long) {
@@ -731,6 +816,8 @@ class NotesRepository(context: Context) {
         } else {
             null
         }
+        val lockedIdx = cursor.getColumnIndex(NotesDatabaseHelper.COL_LOCKED)
+        val locked = lockedIdx >= 0 && cursor.getInt(lockedIdx) == 1
 
         return NoteRecord(
             id = cursor.getString(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_ID)),
@@ -740,6 +827,7 @@ class NotesRepository(context: Context) {
             createdAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_CREATED_AT)),
             updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_UPDATED_AT)),
             pinned = cursor.getInt(cursor.getColumnIndexOrThrow(NotesDatabaseHelper.COL_PINNED)) == 1,
+            locked = locked,
             deletedAt = deletedAt,
             isCorrupted = isCorrupted,
             rawCorruptedJson = if (isCorrupted) richJson else null
@@ -758,6 +846,7 @@ class NotesRepository(context: Context) {
         put(NotesDatabaseHelper.COL_CREATED_AT, note.createdAt)
         put(NotesDatabaseHelper.COL_UPDATED_AT, note.updatedAt)
         put(NotesDatabaseHelper.COL_PINNED, if (note.pinned) 1 else 0)
+        put(NotesDatabaseHelper.COL_LOCKED, if (note.locked) 1 else 0)
         if (note.deletedAt != null) {
             put(NotesDatabaseHelper.COL_DELETED_AT, note.deletedAt)
         } else {
@@ -821,6 +910,7 @@ class NotesRepository(context: Context) {
         return a.title.trim() == b.title.trim() &&
             a.content == b.content &&
             a.pinned == b.pinned &&
+            a.locked == b.locked &&
             a.tags.map { it.lowercase() } == b.tags.map { it.lowercase() }
     }
 
@@ -835,5 +925,10 @@ class NotesRepository(context: Context) {
         private const val KEY_THEME = "theme_option"
         private const val KEY_LANGUAGE = "app_language"
         private const val KEY_SORT_OPTION = "sort_option"
+        private const val KEY_KEEP_SCREEN_ON_READ = "keep_screen_on_read"
+        private const val KEY_BIBLE_REF_STYLE = "bible_ref_display_style"
+        private const val KEY_SMART_LISTS = "smart_lists_enabled"
+        private const val KEY_HOME_LAYOUT = "home_layout_mode"
+        private const val KEY_NOTE_TEXT_SIZE = "note_text_size"
     }
 }

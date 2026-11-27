@@ -97,10 +97,18 @@ class NoteSorterTest {
             NoteSorter.filterNotes(notes, query = "", labelFilter = "Discorsi").map { it.id }
         )
 
-        // Text search without label filter matches across title, body, tags, refs
+        // Text search without label filter matches across title, body, tags, refs (full & abbreviated)
         assertEquals(
             listOf("3"),
             NoteSorter.filterNotes(notes, query = "Giovanni 17:3").map { it.id }
+        )
+        assertEquals(
+            listOf("3"),
+            NoteSorter.filterNotes(notes, query = "Gv 17:3").map { it.id }
+        )
+        assertEquals(
+            listOf("3"),
+            NoteSorter.filterNotes(notes, query = "Sl 23:1").map { it.id }
         )
         assertEquals(
             listOf("1", "2", "3"),

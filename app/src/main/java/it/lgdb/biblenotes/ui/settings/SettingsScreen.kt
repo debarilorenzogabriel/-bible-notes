@@ -1,6 +1,8 @@
 package it.lgdb.biblenotes.ui.settings
 
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -25,10 +27,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
+import androidx.compose.material.icons.automirrored.filled.Label
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -49,16 +61,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import it.lgdb.biblenotes.R
 import it.lgdb.biblenotes.domain.AppStrings
 import it.lgdb.biblenotes.domain.BackupPayload
 import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
+import it.lgdb.biblenotes.model.HomeLayoutMode
 import it.lgdb.biblenotes.model.ImportMode
 import it.lgdb.biblenotes.model.ImportSummary
+import it.lgdb.biblenotes.model.NoteTextSize
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -73,12 +93,26 @@ fun SettingsScreen(
     openWithJwLibrary: Boolean,
     themeOption: ThemeOption,
     language: AppLanguage,
+    keepScreenOnInReadMode: Boolean,
+    bibleRefDisplayStyle: BibleRefDisplayStyle,
+    smartListsEnabled: Boolean,
+    homeLayoutMode: HomeLayoutMode,
+    noteTextSize: NoteTextSize,
+    activeNotesCount: Int,
+    trashedNotesCount: Int,
+    labelsCount: Int,
+    savedRefsCount: Int,
     hasSafetyBackup: Boolean,
     importSummary: ImportSummary?,
     strings: AppStrings,
     onToggleJwLibrary: (Boolean) -> Unit,
     onSelectTheme: (ThemeOption) -> Unit,
     onSelectLanguage: (AppLanguage) -> Unit,
+    onToggleKeepScreenOnInReadMode: (Boolean) -> Unit,
+    onSelectBibleRefDisplayStyle: (BibleRefDisplayStyle) -> Unit,
+    onToggleSmartLists: (Boolean) -> Unit,
+    onSelectHomeLayoutMode: (HomeLayoutMode) -> Unit,
+    onSelectNoteTextSize: (NoteTextSize) -> Unit,
     onPrepareBackupJson: suspend () -> String?,
     onConsumePendingExportJson: () -> String?,
     onClearPendingExportJson: () -> Unit,
@@ -157,29 +191,190 @@ fun SettingsScreen(
 
         // JW Library Toggle
         SettingsCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            SettingsSwitchRow(
+                title = strings.settingsJwTitle,
+                description = strings.settingsJwDesc,
+                checked = openWithJwLibrary,
+                onCheckedChange = onToggleJwLibrary,
+                testTag = "jw_library_switch"
+            )
+        }
+
+        // Scripture Chip Display Style
+        SettingsCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column {
                     Text(
-                        text = strings.settingsJwTitle,
+                        text = strings.settingsBibleRefStyleTitle,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = strings.settingsJwDesc,
+                        text = strings.settingsBibleRefStyleDesc,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(
-                    checked = openWithJwLibrary,
-                    onCheckedChange = onToggleJwLibrary,
-                    modifier = Modifier.testTag("jw_library_switch")
-                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsOptionChip(
+                        label = strings.bibleRefStyleAbbreviated,
+                        icon = Icons.AutoMirrored.Filled.MenuBook,
+                        selected = bibleRefDisplayStyle == BibleRefDisplayStyle.ABBREVIATED,
+                        onClick = { onSelectBibleRefDisplayStyle(BibleRefDisplayStyle.ABBREVIATED) },
+                        testTag = "bible_ref_style_abbreviated_option"
+                    )
+                    SettingsOptionChip(
+                        label = strings.bibleRefStyleFull,
+                        icon = Icons.AutoMirrored.Filled.MenuBook,
+                        selected = bibleRefDisplayStyle == BibleRefDisplayStyle.FULL,
+                        onClick = { onSelectBibleRefDisplayStyle(BibleRefDisplayStyle.FULL) },
+                        testTag = "bible_ref_style_full_option"
+                    )
+                }
+            }
+        }
+
+        // Keep Screen On in Read Mode Toggle
+        SettingsCard {
+            SettingsSwitchRow(
+                title = strings.settingsKeepScreenOnTitle,
+                description = strings.settingsKeepScreenOnDesc,
+                checked = keepScreenOnInReadMode,
+                onCheckedChange = onToggleKeepScreenOnInReadMode,
+                testTag = "keep_screen_on_switch",
+                leadingIcon = Icons.Filled.Lightbulb
+            )
+        }
+
+        // Smart Lists Toggle
+        SettingsCard {
+            SettingsSwitchRow(
+                title = strings.settingsSmartListsTitle,
+                description = strings.settingsSmartListsDesc,
+                checked = smartListsEnabled,
+                onCheckedChange = onToggleSmartLists,
+                testTag = "smart_lists_switch",
+                leadingIcon = Icons.AutoMirrored.Filled.FormatListBulleted
+            )
+        }
+
+        // Home Layout Mode Picker
+        SettingsCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column {
+                    Text(
+                        text = strings.settingsHomeLayoutTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = strings.settingsHomeLayoutDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsOptionChip(
+                        label = strings.homeLayoutGrid,
+                        icon = Icons.Filled.GridView,
+                        selected = homeLayoutMode == HomeLayoutMode.GRID,
+                        onClick = { onSelectHomeLayoutMode(HomeLayoutMode.GRID) },
+                        testTag = "home_layout_grid_option"
+                    )
+                    SettingsOptionChip(
+                        label = strings.homeLayoutList,
+                        icon = Icons.Filled.ViewAgenda,
+                        selected = homeLayoutMode == HomeLayoutMode.LIST,
+                        onClick = { onSelectHomeLayoutMode(HomeLayoutMode.LIST) },
+                        testTag = "home_layout_list_option"
+                    )
+                }
+            }
+        }
+
+        // Note Text Size Picker
+        SettingsCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.FormatSize,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(top = 2.dp)
+                            .size(18.dp)
+                    )
+                    Column {
+                        Text(
+                            text = strings.settingsTextSizeTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = strings.settingsTextSizeDesc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsOptionChip(
+                        label = strings.textSizeSmall,
+                        selected = noteTextSize == NoteTextSize.SMALL,
+                        onClick = { onSelectNoteTextSize(NoteTextSize.SMALL) },
+                        testTag = "text_size_small_option"
+                    )
+                    SettingsOptionChip(
+                        label = strings.textSizeNormal,
+                        selected = noteTextSize == NoteTextSize.NORMAL,
+                        onClick = { onSelectNoteTextSize(NoteTextSize.NORMAL) },
+                        testTag = "text_size_normal_option"
+                    )
+                    SettingsOptionChip(
+                        label = strings.textSizeLarge,
+                        selected = noteTextSize == NoteTextSize.LARGE,
+                        onClick = { onSelectNoteTextSize(NoteTextSize.LARGE) },
+                        testTag = "text_size_large_option"
+                    )
+                    SettingsOptionChip(
+                        label = strings.textSizeExtraLarge,
+                        selected = noteTextSize == NoteTextSize.EXTRA_LARGE,
+                        onClick = { onSelectNoteTextSize(NoteTextSize.EXTRA_LARGE) },
+                        testTag = "text_size_extra_large_option"
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (language == AppLanguage.EN) {
+                            "Preview: Happy are those conscious of their spiritual need. (Mt 5:3)"
+                        } else {
+                            "Anteprima: Felici quelli che sono consapevoli del loro bisogno spirituale. (Mt 5:3)"
+                        },
+                        fontSize = noteTextSize.bodySp.sp,
+                        lineHeight = noteTextSize.lineHeightDp.dp.value.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
             }
         }
 
@@ -361,6 +556,113 @@ fun SettingsScreen(
             }
         }
 
+        // App Info & Statistics Card
+        val versionLabel = remember(context) {
+            runCatching {
+                val pkgInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.packageManager.getPackageInfo(
+                        context.packageName,
+                        PackageManager.PackageInfoFlags.of(0)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.packageManager.getPackageInfo(context.packageName, 0)
+                }
+                pkgInfo.versionName ?: "2.0"
+            }.getOrDefault("2.0")
+        }
+        val appDisplayName = stringResource(id = R.string.app_name)
+
+        SettingsCard(modifier = Modifier.testTag("settings_app_info_card")) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Column {
+                            Text(
+                                text = strings.settingsAppInfoTitle,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = strings.settingsAppInfoDesc,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            text = "$appDisplayName v$versionLabel",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StatsMetricTile(
+                            icon = Icons.AutoMirrored.Filled.Notes,
+                            label = strings.statsActiveNotesLabel,
+                            value = activeNotesCount.toString(),
+                            testTag = "stats_active_notes",
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatsMetricTile(
+                            icon = Icons.Filled.DeleteOutline,
+                            label = strings.statsTrashedNotesLabel,
+                            value = trashedNotesCount.toString(),
+                            testTag = "stats_trashed_notes",
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StatsMetricTile(
+                            icon = Icons.AutoMirrored.Filled.Label,
+                            label = strings.statsLabelsCountLabel,
+                            value = labelsCount.toString(),
+                            testTag = "stats_labels_count",
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatsMetricTile(
+                            icon = Icons.AutoMirrored.Filled.MenuBook,
+                            label = strings.statsSavedRefsLabel,
+                            value = savedRefsCount.toString(),
+                            testTag = "stats_saved_refs",
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(72.dp))
     }
 
@@ -466,16 +768,160 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsCard(content: @Composable () -> Unit) {
+private fun SettingsCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth()
     ) {
         Box(modifier = Modifier.padding(14.dp)) {
             content()
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String,
+    leadingIcon: ImageVector? = null
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (leadingIcon != null) {
+                Icon(
+                    imageVector = leadingIcon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .size(18.dp)
+                )
+            }
+            Column {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(testTag)
+        )
+    }
+}
+
+@Composable
+private fun SettingsOptionChip(
+    label: String,
+    icon: ImageVector? = null,
+    selected: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+        ),
+        modifier = Modifier
+            .defaultMinSize(minHeight = 48.dp)
+            .testTag(testTag)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatsMetricTile(
+    icon: ImageVector,
+    label: String,
+    value: String,
+    testTag: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = modifier.testTag(testTag)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1
+                )
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

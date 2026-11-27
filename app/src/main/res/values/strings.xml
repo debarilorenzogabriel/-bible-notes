@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Bible Notes</string>
+    <string name="widget_pinned_notes_name">Note fissate</string>
+    <string name="widget_pinned_notes_desc">Apri una nuova nota o consulta rapidamente le note fissate.</string>
 </resources>

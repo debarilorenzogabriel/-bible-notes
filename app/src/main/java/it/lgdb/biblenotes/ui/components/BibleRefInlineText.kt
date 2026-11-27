@@ -15,13 +15,24 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -30,8 +41,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import it.lgdb.biblenotes.domain.InNoteSearchMatch
+import it.lgdb.biblenotes.domain.JwLinkBuilder
 import it.lgdb.biblenotes.domain.SpanAdjuster
+import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
 import it.lgdb.biblenotes.model.BibleRefSpan
+import it.lgdb.biblenotes.model.NoteTextSize
 import it.lgdb.biblenotes.model.RichNoteContent
 
 @Composable
@@ -39,42 +55,62 @@ fun BibleRefInlineText(
     content: RichNoteContent,
     style: TextStyle,
     modifier: Modifier = Modifier,
+    language: AppLanguage = AppLanguage.IT,
+    refDisplayStyle: BibleRefDisplayStyle = BibleRefDisplayStyle.ABBREVIATED,
+    textSize: NoteTextSize = NoteTextSize.NORMAL,
     placeholder: String? = null,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
-    chipFontSize: TextUnit = 13.5.sp,
-    chipHeightDp: Dp = 28.dp,
-    onReferenceClick: ((BibleRefSpan) -> Unit)? = null
+    chipFontSize: TextUnit = textSize.chipFontSp.sp,
+    chipHeightDp: Dp = textSize.chipHeightDp.dp,
+    linkColor: Color = MaterialTheme.colorScheme.primary,
+    searchMatches: List<InNoteSearchMatch> = emptyList(),
+    activeSearchMatchIndex: Int = -1,
+    onReferenceClick: ((BibleRefSpan) -> Unit)? = null,
+    onLinkClick: ((String) -> Unit)? = null,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null
 ) {
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
+    val chipScale = textSize.chipFontSp / 13.5f
 
-    val annotated = remember(content) {
-        SpanAdjuster.buildInlineAnnotatedString(content = content)
+    val annotated = remember(content, language, refDisplayStyle, linkColor, onLinkClick) {
+        SpanAdjuster.buildInlineAnnotatedString(
+            content = content,
+            language = language,
+            linkColor = linkColor,
+            onLinkClick = onLinkClick,
+            refDisplayStyle = refDisplayStyle
+        )
     }
 
-    val chipTextStyle = remember(chipFontSize) {
-        TextStyle(
+    val chipTextStyle = remember(style, chipFontSize) {
+        style.copy(
             fontSize = chipFontSize,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            lineHeight = TextUnit.Unspecified
         )
     }
 
     val inlineContent = remember(
         content.bibleRefs,
-        chipFontSize,
+        language,
+        refDisplayStyle,
+        chipTextStyle,
         chipHeightDp,
+        chipScale,
         density,
         onReferenceClick
     ) {
-        val iconSizeDp = if (chipHeightDp <= 24.dp) 13.dp else 15.dp
-        val horizontalPaddingDp = 16.dp
-        val iconSpacingDp = 6.dp
-        val extraSafetyDp = 6.dp
+        val iconSizeDp = (15f * chipScale).dp
+        val horizontalPaddingDp = (16f * chipScale).dp
+        val iconSpacingDp = (6f * chipScale).dp
+        val extraSafetyDp = 1.dp
 
         content.bibleRefs.mapIndexed { index, ref ->
+            val shortLabel = JwLinkBuilder.formatReference(ref, language, refDisplayStyle)
             val measuredPx = textMeasurer.measure(
-                text = AnnotatedString(ref.displayText),
+                text = AnnotatedString(shortLabel),
                 style = chipTextStyle
             ).size.width
 
@@ -91,9 +127,11 @@ fun BibleRefInlineText(
                 )
             ) {
                 BibleReferenceChip(
-                    label = ref.displayText,
+                    label = shortLabel,
                     iconSize = iconSizeDp,
-                    fontSize = chipFontSize,
+                    horizontalPadDp = (8f * chipScale).dp,
+                    iconSpacingDp = iconSpacingDp,
+                    textStyle = chipTextStyle,
                     onClick = if (onReferenceClick != null) {
                         { onReferenceClick(ref) }
                     } else {
@@ -116,21 +154,130 @@ fun BibleRefInlineText(
         style
     }
 
+    var localLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+
+    val mappedMatches = remember(content, searchMatches, language, refDisplayStyle) {
+        searchMatches.map { match ->
+            val range = SpanAdjuster.originalRangeToInlineAnnotatedRange(
+                content = content,
+                origStart = match.start,
+                origEnd = match.end,
+                language = language,
+                refDisplayStyle = refDisplayStyle
+            )
+            match to range
+        }
+    }
+
+    val activeFillColor = Color(0xFFFFB74D).copy(alpha = 0.42f)
+    val inactiveFillColor = Color(0xFF4FC3F7).copy(alpha = 0.24f)
+    val activeBorderColor = Color(0xFFE65100)
+    val inactiveBorderColor = Color(0xFF0288D1).copy(alpha = 0.72f)
+
     Text(
         text = displayText,
         style = effectiveStyle,
         inlineContent = inlineContent,
         maxLines = maxLines,
         overflow = overflow,
-        modifier = modifier
+        onTextLayout = { result ->
+            localLayout = result
+            onTextLayout?.invoke(result)
+        },
+        modifier = modifier.drawWithContent {
+            val layout = localLayout
+            if (layout != null && mappedMatches.isNotEmpty() && layout.layoutInput.text.text == annotated.text) {
+                // 1. Draw soft background fill behind plain-text matches (user saved highlights remain on top!)
+                mappedMatches.forEachIndexed { idx, (match, range) ->
+                    if (!match.isBibleRef && !range.isEmpty()) {
+                        val isActive = idx == activeSearchMatchIndex
+                        val rects = computeTextLayoutRangeRects(layout, range.first, range.last + 1)
+                        val fill = if (isActive) activeFillColor else inactiveFillColor
+                        val corner = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+                        rects.forEach { r ->
+                            drawRoundRect(
+                                color = fill,
+                                topLeft = Offset(r.left, r.top),
+                                size = Size(r.width, r.height),
+                                cornerRadius = corner
+                            )
+                        }
+                    }
+                }
+            }
+
+            drawContent()
+
+            // 2. Draw crisp focus borders on top so matches remain visible even inside saved highlights or chips
+            if (layout != null && mappedMatches.isNotEmpty() && layout.layoutInput.text.text == annotated.text) {
+                val activeStrokePx = 1.8.dp.toPx()
+                val inactiveStrokePx = 1.dp.toPx()
+                mappedMatches.forEachIndexed { idx, (match, range) ->
+                    if (!range.isEmpty()) {
+                        val isActive = idx == activeSearchMatchIndex
+                        val rects = computeTextLayoutRangeRects(layout, range.first, range.last + 1)
+                        val borderColor = if (isActive) activeBorderColor else inactiveBorderColor
+                        val strokeWidth = if (isActive) activeStrokePx else inactiveStrokePx
+                        val corner = CornerRadius(
+                            if (match.isBibleRef) 8.dp.toPx() else 4.dp.toPx(),
+                            if (match.isBibleRef) 8.dp.toPx() else 4.dp.toPx()
+                        )
+                        val pad = if (match.isBibleRef) 1.dp.toPx() else 0.dp.toPx()
+                        rects.forEach { r ->
+                            drawRoundRect(
+                                color = borderColor,
+                                topLeft = Offset(r.left - pad, r.top - pad),
+                                size = Size(r.width + pad * 2, r.height + pad * 2),
+                                cornerRadius = corner,
+                                style = Stroke(width = strokeWidth)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     )
+}
+
+internal fun computeTextLayoutRangeRects(
+    layout: TextLayoutResult,
+    startOffset: Int,
+    endOffset: Int
+): List<Rect> {
+    val len = layout.layoutInput.text.length
+    if (len == 0 || startOffset >= endOffset) return emptyList()
+    val s = startOffset.coerceIn(0, len - 1)
+    val e = (endOffset - 1).coerceIn(s, len - 1)
+    val startLine = layout.getLineForOffset(s)
+    val endLine = layout.getLineForOffset(e)
+    val rects = mutableListOf<Rect>()
+    for (line in startLine..endLine) {
+        val lineFirstChar = if (line == startLine) s else layout.getLineStart(line)
+        val lineLastChar = if (line == endLine) {
+            e
+        } else {
+            (layout.getLineEnd(line, visibleEnd = true) - 1).coerceAtLeast(lineFirstChar)
+        }
+        val firstBox = layout.getBoundingBox(lineFirstChar)
+        val lastBox = layout.getBoundingBox(lineLastChar)
+        val left = minOf(firstBox.left, lastBox.left)
+        val right = maxOf(firstBox.right, lastBox.right)
+        val top = minOf(firstBox.top, lastBox.top)
+        val bottom = maxOf(firstBox.bottom, lastBox.bottom)
+        if (right > left && bottom > top) {
+            rects.add(Rect(left, top, right, bottom))
+        }
+    }
+    return rects
 }
 
 @Composable
 private fun BibleReferenceChip(
     label: String,
     iconSize: Dp,
-    fontSize: TextUnit,
+    horizontalPadDp: Dp,
+    iconSpacingDp: Dp,
+    textStyle: TextStyle,
     onClick: (() -> Unit)?
 ) {
     val shape = RoundedCornerShape(8.dp)
@@ -142,10 +289,10 @@ private fun BibleReferenceChip(
     val content: @Composable () -> Unit = {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(iconSpacingDp),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 8.dp)
+                .padding(horizontal = horizontalPadDp)
         ) {
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.MenuBook,
@@ -155,12 +302,11 @@ private fun BibleReferenceChip(
             )
             Text(
                 text = label,
+                style = textStyle,
                 color = textColor,
-                fontSize = fontSize,
-                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 softWrap = false,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Clip
             )
         }
     }

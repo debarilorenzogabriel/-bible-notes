@@ -22,6 +22,7 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
                 $COL_CREATED_AT INTEGER NOT NULL,
                 $COL_UPDATED_AT INTEGER NOT NULL,
                 $COL_PINNED INTEGER NOT NULL DEFAULT 0,
+                $COL_LOCKED INTEGER NOT NULL DEFAULT 0,
                 $COL_DELETED_AT INTEGER DEFAULT NULL
             )
             """.trimIndent()
@@ -41,6 +42,9 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
             db.execSQL("ALTER TABLE $TABLE_NOTES ADD COLUMN $COL_DELETED_AT INTEGER DEFAULT NULL")
             createDraftsTable(db)
         }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE $TABLE_NOTES ADD COLUMN $COL_LOCKED INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     private fun createDraftsTable(db: SQLiteDatabase) {
@@ -59,7 +63,7 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
 
     companion object {
         const val DATABASE_NAME = "biblenotes_native.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
 
         const val TABLE_NOTES = "notes"
         const val COL_ID = "id"
@@ -70,6 +74,7 @@ class NotesDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val COL_CREATED_AT = "created_at"
         const val COL_UPDATED_AT = "updated_at"
         const val COL_PINNED = "pinned"
+        const val COL_LOCKED = "locked"
         const val COL_DELETED_AT = "deleted_at"
 
         const val TABLE_LABELS = "labels"

@@ -45,10 +45,26 @@ data class BibleRefSpan(
 }
 
 @Serializable
+data class LinkSpan(
+    val start: Int,
+    val end: Int,
+    val url: String
+)
+
+@Serializable
+data class TextFormatSpan(
+    val start: Int,
+    val end: Int
+)
+
+@Serializable
 data class RichNoteContent(
     val text: String = "",
     val highlights: List<HighlightSpan> = emptyList(),
-    val bibleRefs: List<BibleRefSpan> = emptyList()
+    val bibleRefs: List<BibleRefSpan> = emptyList(),
+    val links: List<LinkSpan> = emptyList(),
+    val bolds: List<TextFormatSpan> = emptyList(),
+    val italics: List<TextFormatSpan> = emptyList()
 )
 
 @Serializable
@@ -60,6 +76,7 @@ data class NoteRecord(
     val createdAt: Long,
     val updatedAt: Long,
     val pinned: Boolean,
+    val locked: Boolean = false,
     val deletedAt: Long? = null,
     @Transient val isCorrupted: Boolean = false,
     @Transient val rawCorruptedJson: String? = null
@@ -104,4 +121,26 @@ enum class ThemeOption {
 enum class AppLanguage(val code: String) {
     IT("it"),
     EN("en")
+}
+
+enum class BibleRefDisplayStyle {
+    ABBREVIATED,
+    FULL
+}
+
+enum class HomeLayoutMode {
+    GRID,
+    LIST
+}
+
+enum class NoteTextSize(
+    val bodySp: Float,
+    val lineHeightDp: Float,
+    val chipFontSp: Float,
+    val chipHeightDp: Float
+) {
+    SMALL(bodySp = 13.5f, lineHeightDp = 25f, chipFontSp = 12f, chipHeightDp = 23f),
+    NORMAL(bodySp = 15f, lineHeightDp = 28f, chipFontSp = 13.5f, chipHeightDp = 26f),
+    LARGE(bodySp = 18f, lineHeightDp = 32f, chipFontSp = 15.5f, chipHeightDp = 29f),
+    EXTRA_LARGE(bodySp = 21f, lineHeightDp = 37f, chipFontSp = 17.5f, chipHeightDp = 33f)
 }

@@ -48,6 +48,13 @@ object JwLinkOpener {
         }
     }
 
+    fun openExternalUrl(context: Context, rawUrl: String): Boolean {
+        val normalized = SpanAdjuster.normalizeLinkUrl(rawUrl)
+        if (!SpanAdjuster.isValidLinkUrl(normalized)) return false
+        val uri = Uri.parse(normalized)
+        return tryStartViewIntent(context, uri)
+    }
+
     private fun tryStartViewIntent(context: Context, uri: Uri): Boolean {
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

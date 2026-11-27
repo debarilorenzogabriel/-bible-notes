@@ -1,5 +1,6 @@
 package it.lgdb.biblenotes.domain
 
+import it.lgdb.biblenotes.model.AppLanguage
 import it.lgdb.biblenotes.model.NoteRecord
 import it.lgdb.biblenotes.model.NoteSortOption
 
@@ -52,7 +53,11 @@ object NoteSorter {
             val titleMatch = note.title.lowercase().contains(q)
             val bodyMatch = note.content.text.lowercase().contains(q)
             val refsMatch = note.content.bibleRefs.any { ref ->
-                ref.displayText.lowercase().contains(q)
+                ref.displayText.lowercase().contains(q) ||
+                    JwLinkBuilder.formatAbbreviatedReference(ref, AppLanguage.IT).lowercase().contains(q) ||
+                    JwLinkBuilder.formatAbbreviatedReference(ref, AppLanguage.EN).lowercase().contains(q) ||
+                    JwLinkBuilder.formatFullReference(ref, AppLanguage.IT).lowercase().contains(q) ||
+                    JwLinkBuilder.formatFullReference(ref, AppLanguage.EN).lowercase().contains(q)
             }
             val tagsMatch = if (activeLabel == null) {
                 note.tags.any { it.lowercase().contains(q) }

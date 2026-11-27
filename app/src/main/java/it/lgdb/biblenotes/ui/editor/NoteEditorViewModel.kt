@@ -7,16 +7,24 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import it.lgdb.biblenotes.data.NotesRepository
 import it.lgdb.biblenotes.domain.BibleBook
+import it.lgdb.biblenotes.domain.BibleReferenceDetector
+import it.lgdb.biblenotes.domain.DetectedBibleRef
 import it.lgdb.biblenotes.domain.EditOperationKind
+import it.lgdb.biblenotes.domain.InNoteSearchHelper
+import it.lgdb.biblenotes.domain.InNoteSearchMatch
+import it.lgdb.biblenotes.domain.ListFormattingHelper
 import it.lgdb.biblenotes.domain.OpenBibleResult
 import it.lgdb.biblenotes.domain.SpanAdjuster
 import it.lgdb.biblenotes.domain.UndoHistoryManager
 import it.lgdb.biblenotes.domain.editorStrings
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
 import it.lgdb.biblenotes.model.BibleRefSpan
 import it.lgdb.biblenotes.model.DraftRecord
 import it.lgdb.biblenotes.model.HighlightColor
+import it.lgdb.biblenotes.model.LinkSpan
 import it.lgdb.biblenotes.model.NoteRecord
+import it.lgdb.biblenotes.model.NoteTextSize
 import it.lgdb.biblenotes.model.RichNoteContent
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.Job
@@ -28,6 +36,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -55,19 +64,68 @@ data class NoteEditorUiState(
     val tags: List<String> = emptyList(),
     val availableTags: List<String> = emptyList(),
     val isReadOnlyMode: Boolean = false,
+    val isLocked: Boolean = false,
     val isCorrupted: Boolean = false,
     val rawCorruptedJson: String? = null,
     val openWithJwLibrary: Boolean = false,
     val themeOption: ThemeOption = ThemeOption.LIGHT,
     val language: AppLanguage = AppLanguage.IT,
+    val keepScreenOnInReadMode: Boolean = false,
+    val bibleRefDisplayStyle: BibleRefDisplayStyle = BibleRefDisplayStyle.ABBREVIATED,
+    val smartListsEnabled: Boolean = true,
+    val noteTextSize: NoteTextSize = NoteTextSize.NORMAL,
+    val isInNoteSearchOpen: Boolean = false,
+    val inNoteSearchQuery: String = "",
+    val inNoteSearchMatches: List<InNoteSearchMatch> = emptyList(),
+    val activeInNoteSearchIndex: Int = -1,
     val hasUnsavedChanges: Boolean = false,
     val isSaving: Boolean = false,
     val draftStatus: DraftStatus = DraftStatus.IDLE,
     val canUndo: Boolean = false,
-    val canRedo: Boolean = false
+    val canRedo: Boolean = false,
+    val detectedPlainRefs: List<DetectedBibleRef> = emptyList(),
+    val readTimerElapsedMs: Long = 0L,
+    val readTimerTargetMs: Long? = null,
+    val isReadTimerRunning: Boolean = false
 ) {
     val activeRefAtCursor: BibleRefSpan?
         get() = SpanAdjuster.findRefAtOffset(richContent, textFieldValue.selection.start)
+
+    val activeLinkAtCursor: LinkSpan?
+        get() = SpanAdjuster.findLinkAtOffset(richContent, textFieldValue.selection.start)
+
+    val isSelectionBold: Boolean
+        get() = !textFieldValue.selection.collapsed &&
+            SpanAdjuster.isRangeCoveredBySpans(
+                richContent.bolds,
+                textFieldValue.selection.start,
+                textFieldValue.selection.end
+            )
+
+    val isSelectionItalic: Boolean
+        get() = !textFieldValue.selection.collapsed &&
+            SpanAdjuster.isRangeCoveredBySpans(
+                richContent.italics,
+                textFieldValue.selection.start,
+                textFieldValue.selection.end
+            )
+
+    val detectedRefInSelection: DetectedBibleRef?
+        get() = if (textFieldValue.selection.collapsed) {
+            null
+        } else {
+            BibleReferenceDetector.findOverlappingRange(
+                detectedPlainRefs,
+                textFieldValue.selection.start,
+                textFieldValue.selection.end
+            )
+        }
+
+    val primaryDetectedRef: DetectedBibleRef?
+        get() = BibleReferenceDetector.findNearestToOffset(
+            detectedPlainRefs,
+            textFieldValue.selection.start
+        )
 }
 
 sealed interface EditorEvent {
@@ -84,7 +142,11 @@ class NoteEditorViewModel(
         NoteEditorUiState(
             openWithJwLibrary = repository.getOpenWithJwLibrary(),
             themeOption = repository.getTheme(),
-            language = repository.getLanguage()
+            language = repository.getLanguage(),
+            keepScreenOnInReadMode = repository.getKeepScreenOnInReadMode(),
+            bibleRefDisplayStyle = repository.getBibleRefDisplayStyle(),
+            smartListsEnabled = repository.getSmartListsEnabled(),
+            noteTextSize = repository.getNoteTextSize()
         )
     )
     val uiState: StateFlow<NoteEditorUiState> = _uiState.asStateFlow()
@@ -100,16 +162,24 @@ class NoteEditorViewModel(
     )
     private var autosaveJob: Job? = null
     private var draftFlushJob: Job? = null
+    private var timerTickerJob: Job? = null
+    private var timerAccumulatedMs: Long = 0L
+    private var timerStartedAtMs: Long? = null
     private var isSessionActive: Boolean = false
 
     fun loadSession(
         noteId: String?,
         openWithJwLibrary: Boolean,
         themeOption: ThemeOption,
-        language: AppLanguage
+        language: AppLanguage,
+        keepScreenOnInReadMode: Boolean = repository.getKeepScreenOnInReadMode(),
+        bibleRefDisplayStyle: BibleRefDisplayStyle = repository.getBibleRefDisplayStyle(),
+        smartListsEnabled: Boolean = repository.getSmartListsEnabled(),
+        noteTextSize: NoteTextSize = repository.getNoteTextSize()
     ) {
         autosaveJob?.cancel()
         draftFlushJob?.cancel()
+        stopAndResetTimerState(clearTarget = true)
         undoHistory.clear()
         isSessionActive = true
 
@@ -143,9 +213,14 @@ class NoteEditorViewModel(
                         openWithJwLibrary = openWithJwLibrary,
                         themeOption = themeOption,
                         language = language,
+                        keepScreenOnInReadMode = keepScreenOnInReadMode,
+                        bibleRefDisplayStyle = bibleRefDisplayStyle,
+                        smartListsEnabled = smartListsEnabled,
+                        noteTextSize = noteTextSize,
                         hasUnsavedChanges = true,
                         isSaving = false,
-                        draftStatus = DraftStatus.SAVED
+                        draftStatus = DraftStatus.SAVED,
+                        detectedPlainRefs = BibleReferenceDetector.findAll(draft.content)
                     )
                     emitEvent(EditorEvent.ShowMessage(strings.draftRecoveredMessage))
                 } else {
@@ -155,6 +230,10 @@ class NoteEditorViewModel(
                         openWithJwLibrary = openWithJwLibrary,
                         themeOption = themeOption,
                         language = language,
+                        keepScreenOnInReadMode = keepScreenOnInReadMode,
+                        bibleRefDisplayStyle = bibleRefDisplayStyle,
+                        smartListsEnabled = smartListsEnabled,
+                        noteTextSize = noteTextSize,
                         isSaving = false
                     )
                 }
@@ -169,6 +248,10 @@ class NoteEditorViewModel(
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
+                    keepScreenOnInReadMode = keepScreenOnInReadMode,
+                    bibleRefDisplayStyle = bibleRefDisplayStyle,
+                    smartListsEnabled = smartListsEnabled,
+                    noteTextSize = noteTextSize,
                     isReadOnlyMode = true,
                     isSaving = false
                 )
@@ -185,6 +268,10 @@ class NoteEditorViewModel(
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
+                    keepScreenOnInReadMode = keepScreenOnInReadMode,
+                    bibleRefDisplayStyle = bibleRefDisplayStyle,
+                    smartListsEnabled = smartListsEnabled,
+                    noteTextSize = noteTextSize,
                     isSaving = false
                 )
                 return@launch
@@ -208,6 +295,10 @@ class NoteEditorViewModel(
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
+                    keepScreenOnInReadMode = keepScreenOnInReadMode,
+                    bibleRefDisplayStyle = bibleRefDisplayStyle,
+                    smartListsEnabled = smartListsEnabled,
+                    noteTextSize = noteTextSize,
                     hasUnsavedChanges = false,
                     isSaving = false
                 )
@@ -222,7 +313,8 @@ class NoteEditorViewModel(
                 tags = note.tags
             )
 
-            val draftMatchesChange = draft != null &&
+            val draftMatchesChange = !note.locked &&
+                draft != null &&
                 draft.updatedAt >= note.updatedAt &&
                 (draft.title.trim() != note.title.trim() ||
                     draft.content != note.content ||
@@ -243,12 +335,18 @@ class NoteEditorViewModel(
                     tags = draft.tags,
                     availableTags = allTags,
                     isReadOnlyMode = false,
+                    isLocked = false,
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
+                    keepScreenOnInReadMode = keepScreenOnInReadMode,
+                    bibleRefDisplayStyle = bibleRefDisplayStyle,
+                    smartListsEnabled = smartListsEnabled,
+                    noteTextSize = noteTextSize,
                     hasUnsavedChanges = true,
                     isSaving = false,
-                    draftStatus = DraftStatus.SAVED
+                    draftStatus = DraftStatus.SAVED,
+                    detectedPlainRefs = BibleReferenceDetector.findAll(draft.content)
                 )
                 emitEvent(EditorEvent.ShowMessage(strings.draftRecoveredMessage))
             } else {
@@ -261,16 +359,22 @@ class NoteEditorViewModel(
                     richContent = note.content,
                     textFieldValue = TextFieldValue(
                         text = note.content.text,
-                        selection = TextRange(note.content.text.length)
+                        selection = TextRange.Zero
                     ),
                     tags = note.tags,
                     availableTags = allTags,
                     isReadOnlyMode = true,
+                    isLocked = note.locked,
                     openWithJwLibrary = openWithJwLibrary,
                     themeOption = themeOption,
                     language = language,
+                    keepScreenOnInReadMode = keepScreenOnInReadMode,
+                    bibleRefDisplayStyle = bibleRefDisplayStyle,
+                    smartListsEnabled = smartListsEnabled,
+                    noteTextSize = noteTextSize,
                     hasUnsavedChanges = false,
-                    isSaving = false
+                    isSaving = false,
+                    detectedPlainRefs = BibleReferenceDetector.findAll(note.content)
                 )
             }
         }
@@ -278,7 +382,7 @@ class NoteEditorViewModel(
 
     fun onTitleChanged(newTitle: String) {
         val current = _uiState.value
-        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted || current.title == newTitle) return
+        if (current.isSaving || current.isReadOnlyMode || current.isLocked || current.isCorrupted || current.title == newTitle) return
 
         val (kind, editOffset, nextExpected) = UndoHistoryManager.classifyTitleEdit(current.title, newTitle)
         undoHistory.recordBeforeEdit(
@@ -297,17 +401,28 @@ class NoteEditorViewModel(
 
     fun onBodyValueChanged(newValue: TextFieldValue) {
         val current = _uiState.value
-        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
+        if (current.isSaving || current.isReadOnlyMode || current.isLocked || current.isCorrupted) return
 
-        val textChanged = newValue.text != current.richContent.text
+        val effectiveValue = if (current.smartListsEnabled && newValue.text != current.richContent.text) {
+            ListFormattingHelper.processTextEdit(
+                oldText = current.textFieldValue.text,
+                oldSelection = current.textFieldValue.selection,
+                newValue = newValue,
+                bibleRefs = current.richContent.bibleRefs
+            ) ?: newValue
+        } else {
+            newValue
+        }
+
+        val textChanged = effectiveValue.text != current.richContent.text
         if (!textChanged) {
-            if (newValue.selection != current.textFieldValue.selection) {
+            if (effectiveValue.selection != current.textFieldValue.selection) {
                 undoHistory.onCursorMoved()
             }
         } else {
             val (kind, editOffset, nextExpected) = UndoHistoryManager.classifyBodyEdit(
                 oldValue = current.textFieldValue,
-                newValue = newValue
+                newValue = effectiveValue
             )
             undoHistory.recordBeforeEdit(
                 snapshotBeforeEdit = current.toSnapshot(),
@@ -320,13 +435,13 @@ class NoteEditorViewModel(
 
         _uiState.update { state ->
             val updatedRich = if (textChanged) {
-                SpanAdjuster.onTextChanged(state.richContent, newValue.text)
+                SpanAdjuster.onTextChanged(state.richContent, effectiveValue.text)
             } else {
                 state.richContent
             }
             val updated = state.copy(
                 richContent = updatedRich,
-                textFieldValue = newValue
+                textFieldValue = effectiveValue
             )
             if (textChanged) applyDirtyAndHistoryFlags(updated) else updated
         }
@@ -365,6 +480,203 @@ class NoteEditorViewModel(
         scheduleDraftAutosave()
     }
 
+    fun toggleBold() {
+        val state = _uiState.value
+        if (state.isSaving || state.isReadOnlyMode || state.isCorrupted) return
+        val sel = state.textFieldValue.selection
+        if (sel.collapsed) return
+
+        val updatedContent = SpanAdjuster.toggleBold(
+            content = state.richContent,
+            selectionStart = sel.start,
+            selectionEnd = sel.end
+        )
+        if (updatedContent == state.richContent) return
+
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = state.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
+        _uiState.update {
+            applyDirtyAndHistoryFlags(it.copy(richContent = updatedContent))
+        }
+        scheduleDraftAutosave()
+    }
+
+    fun toggleItalic() {
+        val state = _uiState.value
+        if (state.isSaving || state.isReadOnlyMode || state.isCorrupted) return
+        val sel = state.textFieldValue.selection
+        if (sel.collapsed) return
+
+        val updatedContent = SpanAdjuster.toggleItalic(
+            content = state.richContent,
+            selectionStart = sel.start,
+            selectionEnd = sel.end
+        )
+        if (updatedContent == state.richContent) return
+
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = state.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
+        _uiState.update {
+            applyDirtyAndHistoryFlags(it.copy(richContent = updatedContent))
+        }
+        scheduleDraftAutosave()
+    }
+
+    fun convertDetectedBibleRef(detected: DetectedBibleRef) {
+        val current = _uiState.value
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
+
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
+        _uiState.update { state ->
+            val (updatedContent, newCursor) = SpanAdjuster.convertDetectedBibleRef(
+                content = state.richContent,
+                detected = detected,
+                language = state.language,
+                currentCursor = state.textFieldValue.selection.end
+            )
+            applyDirtyAndHistoryFlags(
+                state.copy(
+                    richContent = updatedContent,
+                    textFieldValue = TextFieldValue(
+                        text = updatedContent.text,
+                        selection = TextRange(newCursor)
+                    )
+                )
+            )
+        }
+        scheduleDraftAutosave()
+    }
+
+    fun convertAllDetectedBibleRefs() {
+        val current = _uiState.value
+        if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
+        val refs = current.detectedPlainRefs
+        if (refs.isEmpty()) return
+
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = current.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
+        _uiState.update { state ->
+            val (updatedContent, newCursor) = SpanAdjuster.convertAllDetectedBibleRefs(
+                content = state.richContent,
+                detectedRefs = state.detectedPlainRefs,
+                language = state.language,
+                currentCursor = state.textFieldValue.selection.end
+            )
+            applyDirtyAndHistoryFlags(
+                state.copy(
+                    richContent = updatedContent,
+                    textFieldValue = TextFieldValue(
+                        text = updatedContent.text,
+                        selection = TextRange(newCursor)
+                    )
+                )
+            )
+        }
+        scheduleDraftAutosave()
+    }
+
+    fun applyLink(
+        selectionStart: Int,
+        selectionEnd: Int,
+        url: String?,
+        displayText: String? = null
+    ) {
+        val state = _uiState.value
+        if (state.isSaving || state.isReadOnlyMode || state.isCorrupted) return
+        val strings = editorStrings(state.language)
+
+        val textLength = state.richContent.text.length
+        val start = minOf(selectionStart, selectionEnd).coerceIn(0, textLength)
+        val end = maxOf(selectionStart, selectionEnd).coerceIn(0, textLength)
+
+        if (url.isNullOrBlank()) {
+            val targetRange = if (start < end) {
+                start to end
+            } else {
+                val active = SpanAdjuster.findLinkAtOffset(state.richContent, start) ?: return
+                active.start to active.end
+            }
+            val clearedContent = SpanAdjuster.applyLink(
+                content = state.richContent,
+                selectionStart = targetRange.first,
+                selectionEnd = targetRange.second,
+                url = null
+            )
+            if (clearedContent == state.richContent) return
+            undoHistory.recordBeforeEdit(
+                snapshotBeforeEdit = state.toSnapshot(),
+                kind = EditOperationKind.DISCRETE,
+                nowMs = currentTimeMs()
+            )
+            _uiState.update {
+                applyDirtyAndHistoryFlags(it.copy(richContent = clearedContent))
+            }
+            scheduleDraftAutosave()
+            return
+        }
+
+        if (!SpanAdjuster.isValidLinkUrl(url)) {
+            emitEvent(EditorEvent.ShowMessage(strings.invalidLinkUrlError))
+            return
+        }
+
+        val normalizedUrl = SpanAdjuster.normalizeLinkUrl(url)
+        val selectedText = if (start < end) state.richContent.text.substring(start, end) else ""
+        val requestedText = displayText?.trim()?.takeIf { it.isNotEmpty() }
+
+        undoHistory.recordBeforeEdit(
+            snapshotBeforeEdit = state.toSnapshot(),
+            kind = EditOperationKind.DISCRETE,
+            nowMs = currentTimeMs()
+        )
+
+        if (start == end || (requestedText != null && requestedText != selectedText)) {
+            val effectiveText = requestedText ?: normalizedUrl
+            val (updatedContent, newCursor) = SpanAdjuster.insertLink(
+                content = state.richContent,
+                selectionStart = start,
+                selectionEnd = end,
+                displayText = effectiveText,
+                url = normalizedUrl
+            )
+            _uiState.update {
+                applyDirtyAndHistoryFlags(
+                    it.copy(
+                        richContent = updatedContent,
+                        textFieldValue = TextFieldValue(
+                            text = updatedContent.text,
+                            selection = TextRange(newCursor)
+                        )
+                    )
+                )
+            }
+        } else {
+            val updatedContent = SpanAdjuster.applyLink(
+                content = state.richContent,
+                selectionStart = start,
+                selectionEnd = end,
+                url = normalizedUrl
+            )
+            _uiState.update {
+                applyDirtyAndHistoryFlags(it.copy(richContent = updatedContent))
+            }
+        }
+        scheduleDraftAutosave()
+    }
+
     fun insertBibleReference(book: BibleBook, chapter: Int, verseSpec: String?) {
         val current = _uiState.value
         if (current.isSaving || current.isReadOnlyMode || current.isCorrupted) return
@@ -376,7 +688,7 @@ class NoteEditorViewModel(
         )
         _uiState.update { state ->
             val sel = state.textFieldValue.selection
-            val localizedBook = book.localizedName(state.language)
+            val localizedBook = book.localizedAbbr(state.language)
             val (updatedContent, newCursor) = SpanAdjuster.insertBibleRef(
                 content = state.richContent,
                 selectionStart = sel.start,
@@ -490,16 +802,54 @@ class NoteEditorViewModel(
 
     fun toggleReadOnlyMode() {
         val state = _uiState.value
-        if (state.isSaving || state.isCorrupted) return
+        if (state.isSaving || state.isCorrupted || state.isLocked) return
         undoHistory.onCursorMoved()
         _uiState.update { it.copy(isReadOnlyMode = !it.isReadOnlyMode) }
     }
 
-    fun enterEditMode() {
+    fun enterEditMode(cursorOffset: Int? = null) {
+        val state = _uiState.value
+        if (state.isSaving || state.isCorrupted || state.isLocked) return
+        undoHistory.onCursorMoved()
+        _uiState.update { current ->
+            val nextSelection = if (cursorOffset != null) {
+                TextRange(cursorOffset.coerceIn(0, current.richContent.text.length))
+            } else {
+                current.textFieldValue.selection
+            }
+            current.copy(
+                isReadOnlyMode = false,
+                textFieldValue = current.textFieldValue.copy(selection = nextSelection)
+            )
+        }
+    }
+
+    fun toggleLock() {
         val state = _uiState.value
         if (state.isSaving || state.isCorrupted) return
+        val nextLocked = !state.isLocked
+        val strings = editorStrings(state.language)
         undoHistory.onCursorMoved()
-        _uiState.update { it.copy(isReadOnlyMode = false) }
+        _uiState.update { current ->
+            current.copy(
+                isLocked = nextLocked,
+                isReadOnlyMode = if (nextLocked) true else current.isReadOnlyMode
+            )
+        }
+        val activeId = state.activeNoteId
+        if (activeId != null) {
+            viewModelScope.launch {
+                runCatching { repository.setNoteLocked(activeId, nextLocked) }
+                    .onFailure { err ->
+                        _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+                    }
+            }
+        }
+        emitEvent(
+            EditorEvent.ShowMessage(
+                if (nextLocked) strings.noteLockedMessage else strings.noteUnlockedMessage
+            )
+        )
     }
 
     fun saveAndClose(silentIfEmpty: Boolean) {
@@ -509,6 +859,7 @@ class NoteEditorViewModel(
 
         if (state.isCorrupted) {
             isSessionActive = false
+            stopAndResetTimerState(clearTarget = true)
             autosaveJob?.cancel()
             draftFlushJob?.cancel()
             emitEvent(EditorEvent.CloseEditor)
@@ -527,18 +878,24 @@ class NoteEditorViewModel(
             repository.invalidateDraftEpoch(draftKey)
             viewModelScope.launch {
                 runCatching { repository.deleteDraft(draftKey) }
-                if (silentIfEmpty) {
-                    isSessionActive = false
-                    _events.emit(EditorEvent.CloseEditor)
-                } else {
-                    _uiState.update { it.copy(isSaving = false) }
-                    _events.emit(EditorEvent.ShowMessage(strings.emptyNoteError))
-                }
+                    .onSuccess {
+                        if (silentIfEmpty) {
+                            isSessionActive = false
+                            stopAndResetTimerState(clearTarget = true)
+                            _events.emit(EditorEvent.CloseEditor)
+                        } else {
+                            _uiState.update { it.copy(isSaving = false, draftStatus = DraftStatus.IDLE) }
+                            _events.emit(EditorEvent.ShowMessage(strings.emptyNoteError))
+                        }
+                    }.onFailure { err ->
+                        _uiState.update { it.copy(isSaving = false) }
+                        _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+                    }
             }
             return
         }
 
-        // No changes on an existing note -> close immediately without rewriting updatedAt
+        // No changes on an existing note -> close only after ensuring any stale draft is removed
         if (state.activeNoteId != null && !state.hasUnsavedChanges) {
             _uiState.update { it.copy(isSaving = true) }
             autosaveJob?.cancel()
@@ -546,8 +903,14 @@ class NoteEditorViewModel(
             repository.invalidateDraftEpoch(draftKey)
             viewModelScope.launch {
                 runCatching { repository.deleteDraft(state.activeNoteId) }
-                isSessionActive = false
-                _events.emit(EditorEvent.CloseEditor)
+                    .onSuccess {
+                        isSessionActive = false
+                        stopAndResetTimerState(clearTarget = true)
+                        _events.emit(EditorEvent.CloseEditor)
+                    }.onFailure { err ->
+                        _uiState.update { it.copy(isSaving = false) }
+                        _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+                    }
             }
             return
         }
@@ -568,7 +931,8 @@ class NoteEditorViewModel(
             tags = state.tags,
             createdAt = state.createdAt ?: now,
             updatedAt = now,
-            pinned = state.pinned
+            pinned = state.pinned,
+            locked = state.isLocked
         )
 
         viewModelScope.launch {
@@ -576,6 +940,7 @@ class NoteEditorViewModel(
                 repository.saveNoteAndDeleteDraft(record, draftKey)
             }.onSuccess {
                 isSessionActive = false
+                stopAndResetTimerState(clearTarget = true)
                 _events.emit(EditorEvent.CloseEditor)
             }.onFailure { err ->
                 _uiState.update { it.copy(isSaving = false) }
@@ -587,6 +952,7 @@ class NoteEditorViewModel(
     fun discardAndClose() {
         val state = _uiState.value
         if (state.isSaving) return
+        val strings = editorStrings(state.language)
         val draftKey = currentDraftKey(state)
 
         _uiState.update { it.copy(isSaving = true) }
@@ -595,9 +961,16 @@ class NoteEditorViewModel(
         repository.invalidateDraftEpoch(draftKey)
 
         viewModelScope.launch {
-            runCatching { repository.deleteDraft(draftKey) }
-            isSessionActive = false
-            _events.emit(EditorEvent.CloseEditor)
+            runCatching {
+                repository.deleteDraft(draftKey)
+            }.onSuccess {
+                isSessionActive = false
+                stopAndResetTimerState(clearTarget = true)
+                _events.emit(EditorEvent.CloseEditor)
+            }.onFailure { err ->
+                _uiState.update { it.copy(isSaving = false) }
+                _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+            }
         }
     }
 
@@ -620,6 +993,7 @@ class NoteEditorViewModel(
                 repository.moveNoteToTrash(id)
             }.onSuccess {
                 isSessionActive = false
+                stopAndResetTimerState(clearTarget = true)
                 _events.emit(EditorEvent.CloseEditor)
             }.onFailure { err ->
                 _uiState.update { it.copy(isSaving = false) }
@@ -630,7 +1004,7 @@ class NoteEditorViewModel(
 
     fun flushDraftOnBackground() {
         val latest = _uiState.value
-        if (!isSessionActive || latest.isCorrupted || latest.isReadOnlyMode || latest.isSaving || !latest.hasUnsavedChanges) {
+        if (!isSessionActive || latest.isCorrupted || latest.isSaving || !latest.hasUnsavedChanges) {
             return
         }
 
@@ -673,18 +1047,27 @@ class NoteEditorViewModel(
         }
     }
 
+    fun onExternalLinkOpenFailed() {
+        val strings = editorStrings(_uiState.value.language)
+        emitEvent(EditorEvent.ShowMessage(strings.cannotOpenLinkMessage))
+    }
+
     private fun scheduleDraftAutosave() {
         val snapshotState = _uiState.value
-        if (!isSessionActive || snapshotState.isSaving || snapshotState.isCorrupted || snapshotState.isReadOnlyMode) return
+        if (!isSessionActive || snapshotState.isSaving || snapshotState.isCorrupted) return
 
         autosaveJob?.cancel()
 
         val draftKey = currentDraftKey(snapshotState)
         val expectedEpoch = repository.currentDraftEpoch(draftKey)
+        val strings = editorStrings(snapshotState.language)
         if (!snapshotState.hasUnsavedChanges) {
             _uiState.update { it.copy(draftStatus = DraftStatus.IDLE) }
             autosaveJob = viewModelScope.launch {
                 runCatching { repository.deleteDraft(draftKey) }
+                    .onFailure { err ->
+                        _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+                    }
             }
             return
         }
@@ -703,7 +1086,7 @@ class NoteEditorViewModel(
                 tags = latest.tags,
                 updatedAt = currentTimeMs()
             )
-            val strings = editorStrings(latest.language)
+            val latestStrings = editorStrings(latest.language)
             runCatching {
                 if (!isDraftNonEmpty(draft) && latest.activeNoteId == null) {
                     repository.deleteDraft(draft.noteKey)
@@ -718,19 +1101,195 @@ class NoteEditorViewModel(
                 }
             }.onFailure { err ->
                 _uiState.update { it.copy(draftStatus = DraftStatus.IDLE) }
-                _events.emit(EditorEvent.ShowMessage("${strings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
+                _events.emit(EditorEvent.ShowMessage("${latestStrings.databaseErrorPrefix} ${err.localizedMessage.orEmpty()}"))
             }
         }
+    }
+
+    fun setNoteTextSize(size: NoteTextSize) {
+        repository.setNoteTextSize(size)
+        _uiState.update { it.copy(noteTextSize = size) }
+    }
+
+    fun toggleInNoteSearch() {
+        _uiState.update { state ->
+            if (state.isInNoteSearchOpen) {
+                state.copy(
+                    isInNoteSearchOpen = false,
+                    inNoteSearchQuery = "",
+                    inNoteSearchMatches = emptyList(),
+                    activeInNoteSearchIndex = -1
+                )
+            } else {
+                state.copy(isInNoteSearchOpen = true)
+            }
+        }
+    }
+
+    fun closeInNoteSearch() {
+        _uiState.update {
+            it.copy(
+                isInNoteSearchOpen = false,
+                inNoteSearchQuery = "",
+                inNoteSearchMatches = emptyList(),
+                activeInNoteSearchIndex = -1
+            )
+        }
+    }
+
+    fun onInNoteSearchQueryChanged(query: String) {
+        _uiState.update { state ->
+            val matches = InNoteSearchHelper.findMatches(
+                content = state.richContent,
+                query = query,
+                language = state.language,
+                refDisplayStyle = state.bibleRefDisplayStyle
+            )
+            val nextIdx = if (matches.isEmpty()) -1 else 0
+            state.copy(
+                inNoteSearchQuery = query,
+                inNoteSearchMatches = matches,
+                activeInNoteSearchIndex = nextIdx
+            )
+        }
+    }
+
+    fun nextInNoteSearchMatch() {
+        _uiState.update { state ->
+            val count = state.inNoteSearchMatches.size
+            if (count == 0) return@update state
+            val nextIdx = if (state.activeInNoteSearchIndex in 0 until count) {
+                (state.activeInNoteSearchIndex + 1) % count
+            } else {
+                0
+            }
+            state.copy(activeInNoteSearchIndex = nextIdx)
+        }
+    }
+
+    fun prevInNoteSearchMatch() {
+        _uiState.update { state ->
+            val count = state.inNoteSearchMatches.size
+            if (count == 0) return@update state
+            val prevIdx = if (state.activeInNoteSearchIndex in 0 until count) {
+                (state.activeInNoteSearchIndex - 1 + count) % count
+            } else {
+                count - 1
+            }
+            state.copy(activeInNoteSearchIndex = prevIdx)
+        }
+    }
+
+    fun toggleReadTimer() {
+        val state = _uiState.value
+        if (state.isCorrupted) return
+        if (state.isReadTimerRunning) {
+            timerAccumulatedMs = currentTimerElapsedMs()
+            timerStartedAtMs = null
+            timerTickerJob?.cancel()
+            timerTickerJob = null
+            _uiState.update {
+                it.copy(
+                    isReadTimerRunning = false,
+                    readTimerElapsedMs = timerAccumulatedMs
+                )
+            }
+        } else {
+            timerStartedAtMs = currentTimeMs()
+            _uiState.update {
+                it.copy(
+                    isReadTimerRunning = true,
+                    readTimerElapsedMs = timerAccumulatedMs
+                )
+            }
+            timerTickerJob?.cancel()
+            timerTickerJob = viewModelScope.launch {
+                while (isActive) {
+                    delay(TIMER_TICK_MS)
+                    val elapsed = currentTimerElapsedMs()
+                    _uiState.update { current ->
+                        if (!current.isReadTimerRunning) return@update current
+                        current.copy(readTimerElapsedMs = elapsed)
+                    }
+                }
+            }
+        }
+    }
+
+    fun resetReadTimer() {
+        stopAndResetTimerState(clearTarget = false)
+    }
+
+    fun setReadTimerStopwatchMode() {
+        stopAndResetTimerState(clearTarget = true)
+    }
+
+    fun setReadTimerCountdownMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(1, 180)
+        timerTickerJob?.cancel()
+        timerTickerJob = null
+        timerAccumulatedMs = 0L
+        timerStartedAtMs = null
+        _uiState.update {
+            it.copy(
+                isReadTimerRunning = false,
+                readTimerElapsedMs = 0L,
+                readTimerTargetMs = clamped * 60_000L
+            )
+        }
+    }
+
+    private fun currentTimerElapsedMs(): Long {
+        val startedAt = timerStartedAtMs ?: return timerAccumulatedMs
+        val delta = (currentTimeMs() - startedAt).coerceAtLeast(0L)
+        return timerAccumulatedMs + delta
+    }
+
+    private fun stopAndResetTimerState(clearTarget: Boolean) {
+        timerTickerJob?.cancel()
+        timerTickerJob = null
+        timerAccumulatedMs = 0L
+        timerStartedAtMs = null
+        _uiState.update { current ->
+            current.copy(
+                isReadTimerRunning = false,
+                readTimerElapsedMs = 0L,
+                readTimerTargetMs = if (clearTarget) null else current.readTimerTargetMs
+            )
+        }
+    }
+
+    override fun onCleared() {
+        timerTickerJob?.cancel()
+        super.onCleared()
     }
 
     private fun applyDirtyAndHistoryFlags(state: NoteEditorUiState): NoteEditorUiState {
         val isDirty = state.title != baselineSnapshot.title ||
             state.richContent != baselineSnapshot.richContent ||
             state.tags != baselineSnapshot.tags
+        val matches = if (state.isInNoteSearchOpen && state.inNoteSearchQuery.isNotBlank()) {
+            InNoteSearchHelper.findMatches(
+                content = state.richContent,
+                query = state.inNoteSearchQuery,
+                language = state.language,
+                refDisplayStyle = state.bibleRefDisplayStyle
+            )
+        } else {
+            emptyList()
+        }
+        val clampedMatchIndex = when {
+            matches.isEmpty() -> -1
+            state.activeInNoteSearchIndex in matches.indices -> state.activeInNoteSearchIndex
+            else -> 0
+        }
         return state.copy(
             hasUnsavedChanges = isDirty,
             canUndo = undoHistory.canUndo,
-            canRedo = undoHistory.canRedo
+            canRedo = undoHistory.canRedo,
+            detectedPlainRefs = BibleReferenceDetector.findAll(state.richContent),
+            inNoteSearchMatches = matches,
+            activeInNoteSearchIndex = clampedMatchIndex
         )
     }
 
@@ -748,6 +1307,9 @@ class NoteEditorViewModel(
         draft.title.isNotBlank() ||
             draft.content.text.isNotBlank() ||
             draft.content.bibleRefs.isNotEmpty() ||
+            draft.content.links.isNotEmpty() ||
+            draft.content.bolds.isNotEmpty() ||
+            draft.content.italics.isNotEmpty() ||
             draft.tags.isNotEmpty()
 
     private fun emitEvent(event: EditorEvent) {
@@ -768,5 +1330,6 @@ class NoteEditorViewModel(
         private const val TYPING_COALESCE_MS = 700L
         private const val MAX_TYPING_GROUP_MS = 4000L
         private const val MAX_UNDO_STEPS = 60
+        private const val TIMER_TICK_MS = 200L
     }
 }

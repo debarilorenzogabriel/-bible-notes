@@ -10,10 +10,13 @@ import it.lgdb.biblenotes.domain.BackupSerializer
 import it.lgdb.biblenotes.domain.NoteSorter
 import it.lgdb.biblenotes.domain.appStrings
 import it.lgdb.biblenotes.model.AppLanguage
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
+import it.lgdb.biblenotes.model.HomeLayoutMode
 import it.lgdb.biblenotes.model.ImportMode
 import it.lgdb.biblenotes.model.ImportSummary
 import it.lgdb.biblenotes.model.NoteRecord
 import it.lgdb.biblenotes.model.NoteSortOption
+import it.lgdb.biblenotes.model.NoteTextSize
 import it.lgdb.biblenotes.model.ThemeOption
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +38,7 @@ data class MainAppUiState(
     val isEditorOpen: Boolean = false,
     val isTrashOpen: Boolean = false,
     val editorTargetNoteId: String? = null,
+    val editorSessionNonce: Int = 0,
     val allNotes: List<NoteRecord> = emptyList(),
     val trashedNotes: List<NoteRecord> = emptyList(),
     val homeSearchQuery: String = "",
@@ -45,9 +49,17 @@ data class MainAppUiState(
     val openWithJwLibrary: Boolean = false,
     val themeOption: ThemeOption = ThemeOption.LIGHT,
     val language: AppLanguage = AppLanguage.IT,
+    val keepScreenOnInReadMode: Boolean = false,
+    val bibleRefDisplayStyle: BibleRefDisplayStyle = BibleRefDisplayStyle.ABBREVIATED,
+    val smartListsEnabled: Boolean = true,
+    val homeLayoutMode: HomeLayoutMode = HomeLayoutMode.GRID,
+    val noteTextSize: NoteTextSize = NoteTextSize.NORMAL,
     val hasSafetyBackup: Boolean = false,
     val lastImportSummary: ImportSummary? = null
 ) {
+    val totalSavedRefsCount: Int
+        get() = allNotes.sumOf { it.content.bibleRefs.size }
+
     val filteredNotes: List<NoteRecord>
         get() = NoteSorter.filterNotes(
             notes = allNotes,
@@ -76,6 +88,11 @@ class MainAppViewModel(
             openWithJwLibrary = repository.getOpenWithJwLibrary(),
             themeOption = repository.getTheme(),
             language = repository.getLanguage(),
+            keepScreenOnInReadMode = repository.getKeepScreenOnInReadMode(),
+            bibleRefDisplayStyle = repository.getBibleRefDisplayStyle(),
+            smartListsEnabled = repository.getSmartListsEnabled(),
+            homeLayoutMode = repository.getHomeLayoutMode(),
+            noteTextSize = repository.getNoteTextSize(),
             sortOption = repository.getSortOption(),
             hasSafetyBackup = repository.hasSafetyBackup()
         )
@@ -144,8 +161,11 @@ class MainAppViewModel(
     fun openNewNoteEditor() {
         _uiState.update {
             it.copy(
+                currentTab = MainTab.HOME,
+                isTrashOpen = false,
                 isEditorOpen = true,
-                editorTargetNoteId = null
+                editorTargetNoteId = null,
+                editorSessionNonce = it.editorSessionNonce + 1
             )
         }
     }
@@ -153,10 +173,25 @@ class MainAppViewModel(
     fun openNoteEditor(noteId: String) {
         _uiState.update {
             it.copy(
+                currentTab = MainTab.HOME,
+                isTrashOpen = false,
                 isEditorOpen = true,
-                editorTargetNoteId = noteId
+                editorTargetNoteId = noteId,
+                editorSessionNonce = it.editorSessionNonce + 1
             )
         }
+    }
+
+    fun openHomeFromWidget() {
+        _uiState.update {
+            it.copy(
+                currentTab = MainTab.HOME,
+                isTrashOpen = false,
+                isEditorOpen = false,
+                editorTargetNoteId = null
+            )
+        }
+        refreshData()
     }
 
     fun closeEditor() {
@@ -339,6 +374,31 @@ class MainAppViewModel(
     fun setLanguage(language: AppLanguage) {
         repository.setLanguage(language)
         _uiState.update { it.copy(language = language) }
+    }
+
+    fun setKeepScreenOnInReadMode(enabled: Boolean) {
+        repository.setKeepScreenOnInReadMode(enabled)
+        _uiState.update { it.copy(keepScreenOnInReadMode = enabled) }
+    }
+
+    fun setBibleRefDisplayStyle(style: BibleRefDisplayStyle) {
+        repository.setBibleRefDisplayStyle(style)
+        _uiState.update { it.copy(bibleRefDisplayStyle = style) }
+    }
+
+    fun setSmartListsEnabled(enabled: Boolean) {
+        repository.setSmartListsEnabled(enabled)
+        _uiState.update { it.copy(smartListsEnabled = enabled) }
+    }
+
+    fun setHomeLayoutMode(mode: HomeLayoutMode) {
+        repository.setHomeLayoutMode(mode)
+        _uiState.update { it.copy(homeLayoutMode = mode) }
+    }
+
+    fun setNoteTextSize(size: NoteTextSize) {
+        repository.setNoteTextSize(size)
+        _uiState.update { it.copy(noteTextSize = size) }
     }
 
     fun notifyMessage(message: String) {

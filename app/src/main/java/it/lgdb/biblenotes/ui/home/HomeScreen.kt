@@ -1,5 +1,9 @@
 package it.lgdb.biblenotes.ui.home
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -42,9 +46,16 @@ import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -58,6 +69,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
@@ -76,6 +88,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -84,7 +97,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import it.lgdb.biblenotes.domain.AppStrings
+import it.lgdb.biblenotes.domain.JwLinkBuilder
+import it.lgdb.biblenotes.domain.NoteExportFormatter
+import it.lgdb.biblenotes.domain.NotePdfExporter
 import it.lgdb.biblenotes.domain.SpanAdjuster
+import it.lgdb.biblenotes.model.BibleRefDisplayStyle
+import it.lgdb.biblenotes.model.HomeLayoutMode
 import it.lgdb.biblenotes.model.NoteRecord
 import it.lgdb.biblenotes.model.NoteSortOption
 import it.lgdb.biblenotes.ui.theme.LocalBibleNotesExtraColors
@@ -101,6 +119,8 @@ fun HomeScreen(
     selectedLabelFilter: String?,
     sortOption: NoteSortOption,
     trashedCount: Int,
+    homeLayoutMode: HomeLayoutMode = HomeLayoutMode.GRID,
+    bibleRefStyle: BibleRefDisplayStyle = BibleRefDisplayStyle.ABBREVIATED,
     strings: AppStrings,
     onSearchQueryChange: (String) -> Unit,
     onClearLabelFilter: () -> Unit,
@@ -111,12 +131,14 @@ fun HomeScreen(
     onTogglePin: (String) -> Unit,
     onDeleteNote: (String) -> Unit,
     onNoteCopied: () -> Unit,
+    onNotifyMessage: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
     val gridState = rememberLazyGridState()
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
     @Suppress("DEPRECATION")
     val clipboardManager = LocalClipboardManager.current
 
@@ -127,7 +149,47 @@ fun HomeScreen(
     }
 
     var pendingDeleteNote by remember { mutableStateOf<NoteRecord?>(null) }
+    var pendingPdfExportNote by remember { mutableStateOf<NoteRecord?>(null) }
+    var pendingPdfSaveNote by remember { mutableStateOf<NoteRecord?>(null) }
     var showSortMenu by remember { mutableStateOf(false) }
+
+    val pdfSaveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri: Uri? ->
+        val target = pendingPdfSaveNote
+        pendingPdfSaveNote = null
+        if (uri != null && target != null) {
+            coroutineScope.launch {
+                val success = NotePdfExporter.writePdfToUri(
+                    context = context,
+                    uri = uri,
+                    note = target,
+                    language = strings.language,
+                    refDisplayStyle = bibleRefStyle,
+                    strings = strings
+                )
+                onNotifyMessage(if (success) strings.pdfExportSuccess else strings.pdfExportError)
+            }
+        }
+    }
+
+    val shareNote: (NoteRecord) -> Unit = { target ->
+        val shareText = NoteExportFormatter.formatForPlainShare(
+            note = target,
+            language = strings.language,
+            refDisplayStyle = bibleRefStyle
+        )
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, shareText)
+            if (target.title.isNotBlank()) {
+                putExtra(Intent.EXTRA_SUBJECT, target.title.trim())
+            }
+        }
+        val chooser = Intent.createChooser(sendIntent, strings.shareChooserTitle)
+        runCatching { context.startActivity(chooser) }
+            .onFailure { onNotifyMessage(strings.noAppAvailableMessage) }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -314,32 +376,41 @@ fun HomeScreen(
                     )
                 }
             } else {
+                val isListMode = homeLayoutMode == HomeLayoutMode.LIST
                 LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Adaptive(minSize = 152.dp),
+                    columns = if (isListMode) {
+                        GridCells.Fixed(1)
+                    } else {
+                        GridCells.Adaptive(minSize = 152.dp)
+                    },
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (isListMode) 12.dp else 14.dp),
                     contentPadding = PaddingValues(bottom = 96.dp),
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag(if (isListMode) "home_notes_list" else "home_notes_grid")
                 ) {
                     items(notes, key = { it.id }) { note ->
                         NotePostItCard(
                             note = note,
+                            isListMode = isListMode,
+                            bibleRefStyle = bibleRefStyle,
                             strings = strings,
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onClick = { onNoteClick(note.id) },
                             onCopy = {
-                                val textToCopy = buildString {
-                                    if (note.title.isNotBlank()) {
-                                        append(note.title)
-                                        append("\n\n")
-                                    }
-                                    append(note.rawCorruptedJson ?: note.content.text)
-                                }
+                                val textToCopy = NoteExportFormatter.formatForPlainShare(
+                                    note = note,
+                                    language = strings.language,
+                                    refDisplayStyle = bibleRefStyle
+                                )
                                 clipboardManager.setText(AnnotatedString(textToCopy))
                                 onNoteCopied()
                             },
+                            onShare = { shareNote(note) },
+                            onExportPdf = { pendingPdfExportNote = note },
                             onTogglePin = { onTogglePin(note.id) },
                             onDeleteRequest = { pendingDeleteNote = note },
                             modifier = Modifier.animateItem(
@@ -401,6 +472,88 @@ fun HomeScreen(
             }
         )
     }
+
+    pendingPdfExportNote?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingPdfExportNote = null },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PictureAsPdf,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(strings.exportPdfDialogTitle)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = strings.exportPdfDialogBody,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Button(
+                        onClick = {
+                            pendingPdfExportNote = null
+                            pendingPdfSaveNote = target
+                            val suggestedName = NoteExportFormatter.buildPdfSuggestedFileName(
+                                note = target,
+                                language = strings.language
+                            )
+                            pdfSaveLauncher.launch(suggestedName)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("export_pdf_save_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.FileDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.exportPdfSaveAction)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            pendingPdfExportNote = null
+                            val started = NotePdfExporter.printNote(
+                                context = context,
+                                note = target,
+                                language = strings.language,
+                                refDisplayStyle = bibleRefStyle,
+                                strings = strings
+                            )
+                            if (!started) {
+                                onNotifyMessage(strings.pdfExportError)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("export_pdf_print_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Print,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(strings.exportPdfPrintAction)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { pendingPdfExportNote = null }) {
+                    Text(strings.cancelAction)
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -431,11 +584,15 @@ private fun SortMenuOption(
 @Composable
 private fun NotePostItCard(
     note: NoteRecord,
+    isListMode: Boolean,
+    bibleRefStyle: BibleRefDisplayStyle,
     strings: AppStrings,
     sharedTransitionScope: SharedTransitionScope?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
     onClick: () -> Unit,
     onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onExportPdf: () -> Unit,
     onTogglePin: () -> Unit,
     onDeleteRequest: () -> Unit,
     modifier: Modifier = Modifier
@@ -447,18 +604,24 @@ private fun NotePostItCard(
     var menuExpanded by remember { mutableStateOf(false) }
 
     val cardShape = RoundedCornerShape(14.dp)
-    val primaryLabel = remember(note.tags) {
+    val primaryLabel = remember(note.tags, isListMode) {
         when {
             note.tags.isEmpty() -> ""
             note.tags.size == 1 -> note.tags.first()
+            isListMode && note.tags.size == 2 -> note.tags.joinToString(" • ")
+            isListMode -> "${note.tags.take(2).joinToString(" • ")} +${note.tags.size - 2}"
             else -> "${note.tags.first()} +${note.tags.size - 1}"
         }
     }
-    val previewAnnotated = remember(note.content, textColor) {
+    val urlColor = MaterialTheme.colorScheme.primary
+    val previewAnnotated = remember(note.content, textColor, urlColor, strings.language, bibleRefStyle) {
         SpanAdjuster.buildAnnotatedString(
             content = note.content,
             linkColor = textColor.copy(alpha = 0.92f),
-            refBackgroundColor = Color.Transparent
+            refBackgroundColor = Color.Transparent,
+            language = strings.language,
+            urlColor = urlColor,
+            refDisplayStyle = bibleRefStyle
         )
     }
 
@@ -495,25 +658,49 @@ private fun NotePostItCard(
                 onClick = onClick,
                 onLongClick = { menuExpanded = true }
             )
-            .defaultMinSize(minHeight = 148.dp)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-    ) {
-        if (note.pinned) {
-            Icon(
-                imageVector = Icons.Filled.PushPin,
-                contentDescription = strings.contextPin,
-                tint = extraColors.pinColor.copy(alpha = 0.85f),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(14.dp)
-                    .graphicsLayer { rotationZ = 32f }
+            .defaultMinSize(minHeight = if (isListMode) 96.dp else 148.dp)
+            .padding(
+                horizontal = if (isListMode) 16.dp else 14.dp,
+                vertical = if (isListMode) 14.dp else 12.dp
             )
+    ) {
+        val topEndIconPadding = when {
+            note.pinned && note.locked -> 38.dp
+            note.pinned || note.locked -> 20.dp
+            else -> 0.dp
+        }
+
+        if (note.pinned || note.locked) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                modifier = Modifier.align(Alignment.TopEnd)
+            ) {
+                if (note.locked) {
+                    Icon(
+                        imageVector = Icons.Filled.Lock,
+                        contentDescription = strings.lockedBadgeLabel,
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+                if (note.pinned) {
+                    Icon(
+                        imageVector = Icons.Filled.PushPin,
+                        contentDescription = strings.contextPin,
+                        tint = extraColors.pinColor.copy(alpha = 0.85f),
+                        modifier = Modifier
+                            .size(14.dp)
+                            .graphicsLayer { rotationZ = 32f }
+                    )
+                }
+            }
         }
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 124.dp),
+                .defaultMinSize(minHeight = if (isListMode) 68.dp else 124.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
@@ -526,7 +713,7 @@ private fun NotePostItCard(
                         color = textColor,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(end = if (note.pinned) 20.dp else 0.dp)
+                        modifier = Modifier.padding(end = topEndIconPadding)
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                 }
@@ -537,7 +724,7 @@ private fun NotePostItCard(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.padding(
                             top = 2.dp,
-                            end = if (note.title.isBlank() && note.pinned) 20.dp else 0.dp
+                            end = if (note.title.isBlank()) topEndIconPadding else 0.dp
                         )
                     ) {
                         Icon(
@@ -559,10 +746,14 @@ private fun NotePostItCard(
                         fontSize = 13.sp,
                         lineHeight = 19.sp,
                         color = textColor.copy(alpha = 0.86f),
-                        maxLines = if (note.title.isNotBlank()) 3 else 4,
+                        maxLines = if (isListMode) {
+                            if (note.title.isNotBlank()) 6 else 7
+                        } else {
+                            if (note.title.isNotBlank()) 3 else 4
+                        },
                         overflow = TextOverflow.Ellipsis,
-                        modifier = if (note.title.isBlank() && note.pinned) {
-                            Modifier.padding(end = 20.dp)
+                        modifier = if (note.title.isBlank() && topEndIconPadding > 0.dp) {
+                            Modifier.padding(end = topEndIconPadding)
                         } else {
                             Modifier
                         }
@@ -571,11 +762,16 @@ private fun NotePostItCard(
 
                 if (!note.isCorrupted && note.content.bibleRefs.isNotEmpty()) {
                     val firstRef = note.content.bibleRefs.first()
+                    val firstShortLabel = JwLinkBuilder.formatReference(
+                        ref = firstRef,
+                        language = strings.language,
+                        style = bibleRefStyle
+                    )
                     val extraRefsCount = note.content.bibleRefs.size - 1
                     val scriptureLabel = if (extraRefsCount > 0) {
-                        "${firstRef.displayText} +$extraRefsCount"
+                        "$firstShortLabel +$extraRefsCount"
                     } else {
-                        firstRef.displayText
+                        firstShortLabel
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
@@ -639,6 +835,13 @@ private fun NotePostItCard(
         ) {
             DropdownMenuItem(
                 text = { Text(strings.contextCopy) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
                 onClick = {
                     menuExpanded = false
                     onCopy()
@@ -646,7 +849,44 @@ private fun NotePostItCard(
             )
             if (!note.isCorrupted) {
                 DropdownMenuItem(
+                    text = { Text(strings.contextShare) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onShare()
+                    },
+                    modifier = Modifier.testTag("note_context_share")
+                )
+                DropdownMenuItem(
+                    text = { Text(strings.contextExportPdf) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.PictureAsPdf,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onExportPdf()
+                    },
+                    modifier = Modifier.testTag("note_context_export_pdf")
+                )
+                DropdownMenuItem(
                     text = { Text(if (note.pinned) strings.contextUnpin else strings.contextPin) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.PushPin,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
                     onClick = {
                         menuExpanded = false
                         onTogglePin()
@@ -655,6 +895,13 @@ private fun NotePostItCard(
             }
             DropdownMenuItem(
                 text = { Text(strings.contextEdit) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
                 onClick = {
                     menuExpanded = false
                     onClick()
@@ -665,6 +912,14 @@ private fun NotePostItCard(
                     Text(
                         text = strings.contextDelete,
                         color = MaterialTheme.colorScheme.error
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.DeleteOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
                     )
                 },
                 onClick = {
